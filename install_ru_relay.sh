@@ -14,15 +14,30 @@ disable_ufw() {
 # --- Запрос параметров EN сервера ---
 ask_en_params() {
     echo -e "\n${BLUE}═══ Параметры EN сервера ═══${NC}"
+    
+    # ВАЖНО: сохраняем RU_MT_PORT из ask_mode()
+    local SAVED_RU_MT_PORT=$RU_MT_PORT
+    
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
         echo -e "${YELLOW}Найдена предыдущая конфигурация:${NC}"
         echo "  EN IP: $EN_SERVER_IP"
         echo "  Режим: $WORK_MODE"
-        echo "  MTProto: $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT"
+        echo "  MTProto RU: $RU_MT_PORT → EN: $EN_MT_PORT"
         echo ""
         read -rp "Использовать эти параметры? (Y/n): " use
-        [ "$use" != "n" ] && [ "$use" != "N" ] && return 0
+        if [ "$use" != "n" ] && [ "$use" != "N" ]; then
+            # Восстанавливаем RU_MT_PORT из режима, а не из конфига
+            RU_MT_PORT=$SAVED_RU_MT_PORT
+            # EN_MT_PORT должен совпадать с режимом
+            if [ "$WORK_MODE" = "domain" ]; then
+                EN_MT_PORT=8443
+            else
+                EN_MT_PORT=443
+            fi
+            echo -e "${GREEN}✓ Используем сохранённые данные (порты обновлены под режим)${NC}"
+            return 0
+        fi
     fi
     
     read -rp "IP EN сервера: " EN_SERVER_IP
@@ -31,7 +46,7 @@ ask_en_params() {
     read -rp "Порт VLESS на EN [8443]: " input; EN_VLESS_PORT=${input:-8443}
     read -rp "Порт SOCKS на EN [10808]: " input; EN_SOCKS_PORT=${input:-10808}
     
-    # Порт MTProto зависит от режима
+    # Порт MTProto на EN зависит от режима
     if [ "$WORK_MODE" = "domain" ]; then
         read -rp "Порт MTProto на EN [8443]: " input; EN_MT_PORT=${input:-8443}
     else
@@ -40,7 +55,11 @@ ask_en_params() {
     
     RU_VLESS_PORT=8443
     RU_SOCKS_PORT=10808
-    # RU_MT_PORT уже установлен в ask_mode
+    # RU_MT_PORT уже установлен в ask_mode() — НЕ перезаписываем!
+    
+    echo -e "${GREEN}✓ Параметры установлены:${NC}"
+    echo -e "  MTProto RU порт: $RU_MT_PORT"
+    echo -e "  MTProto EN порт: $EN_MT_PORT"
 }
 
 # --- Запрос домена ---
@@ -99,7 +118,7 @@ ask_mode() {
             RU_MT_PORT=443
             ;;
     esac
-    echo -e "${GREEN}✓ Режим: $WORK_MODE, MT порт: $RU_MT_PORT${NC}"
+    echo -e "${GREEN}✓ Режим: $WORK_MODE, MT порт на RU: $RU_MT_PORT${NC}"
 }
 
 # --- Выбор метода relay ---
@@ -251,6 +270,8 @@ setup_ssl() {
 # --- Настройка iptables ---
 setup_iptables() {
     echo -e "\n${YELLOW}→ Настройка iptables (DNAT)...${NC}"
+    echo -e "  MTProto: $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT"
+    
     grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf || { echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf; sysctl -p >/dev/null 2>&1; }
     
     SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
@@ -278,16 +299,14 @@ setup_iptables() {
     iptables -t nat -A PREROUTING -p udp --dport $RU_SOCKS_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_SOCKS_PORT}
     iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p udp --dport ${EN_SOCKS_PORT} -j MASQUERADE
     
-    # MTProto НЕ трогаем, если используется Nginx
-    if [ "$RELAY_METHOD" != "nginx" ]; then
-        iptables -t nat -A PREROUTING -p tcp --dport $RU_MT_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_MT_PORT}
-        iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_MT_PORT} -j MASQUERADE
-    fi
+    # MTProto — ВАЖНО: используем $RU_MT_PORT и $EN_MT_PORT
+    iptables -t nat -A PREROUTING -p tcp --dport $RU_MT_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_MT_PORT}
+    iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_MT_PORT} -j MASQUERADE
     
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4 2>/dev/null
     dpkg -l | grep -q iptables-persistent || { echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections; apt-get install -y iptables-persistent >/dev/null 2>&1; }
-    echo -e "${GREEN}✓ iptables настроен${NC}"
+    echo -e "${GREEN}✓ iptables настроен (MT: $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT)${NC}"
 }
 
 # --- Настройка socat ---
@@ -497,22 +516,23 @@ menu() {
         read -rp "Введите номер: " choice
         case $choice in
             1)
-                disable_ufw
-                ask_mode              # ← Выбор режима ПЕРВЫМ
-                ask_en_params || { read -rp "Enter..."; continue; }
-                ask_domain || { read -rp "Enter..."; continue; }
-                ask_ip_type
-                ask_relay_method
-                [ "$WORK_MODE" = "domain" ] && check_dns || true
-                install_deps
-                setup_iptables
-                [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ] && setup_socat
-                [ "$WORK_MODE" = "domain" ] && { setup_nginx; setup_ssl; }
-                save_config
-                generate_html
-                echo -e "\n${GREEN}✅ НАСТРОЙКА ЗАВЕРШЕНА${NC}"
-                echo -e "HTML: ${YELLOW}$HTML_FILE${NC}"
-                ;;
+            disable_ufw
+            ask_mode              # ← ПЕРВЫМ! Устанавливает WORK_MODE и RU_MT_PORT
+            ask_en_params || { read -rp "Enter..."; continue; }   # ← НЕ перезаписывает RU_MT_PORT
+            ask_domain || { read -rp "Enter..."; continue; }
+            ask_ip_type
+            ask_relay_method
+            [ "$WORK_MODE" = "domain" ] && check_dns || true
+            install_deps
+            setup_iptables
+            [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ] && setup_socat
+            [ "$WORK_MODE" = "domain" ] && { setup_nginx; setup_ssl; }
+            save_config
+            generate_html
+            echo -e "\n${GREEN}✅ НАСТРОЙКА ЗАВЕРШЕНА${NC}"
+            echo -e "HTML: ${YELLOW}$HTML_FILE${NC}"
+            echo -e "MTProto: ${YELLOW}$RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT${NC}"
+            ;;
             # ... остальные пункты без изменений
             0) echo "Выход..."; exit 0 ;;
             *) echo -e "${RED}Неверный выбор${NC}" ;;
