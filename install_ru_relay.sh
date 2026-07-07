@@ -143,29 +143,23 @@ check_dns() {
 setup_nginx() {
     echo -e "\n${YELLOW}→ Настройка Nginx (stream proxy с SNI routing)...${NC}"
     
-    # Устанавливаем модуль stream (обязательно!)
+    # Устанавливаем модуль stream
     echo -e "  Установка модуля libnginx-mod-stream..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1
     apt-get install -y libnginx-mod-stream >/dev/null 2>&1
     
-    # Проверяем, что модуль установлен
     if [ ! -f "/etc/nginx/modules-enabled/50-mod-stream.conf" ] && \
        [ ! -f "/usr/share/nginx/modules-available/mod-stream.conf" ]; then
         echo -e "${RED}✗ Модуль stream не установлен!${NC}"
-        echo -e "${YELLOW}Попробуйте вручную: apt-get install libnginx-mod-stream${NC}"
         return 1
     fi
     echo -e "${GREEN}✓ Модуль stream установлен${NC}"
     
-    # Создаём директорию для конфигов stream
     mkdir -p /etc/nginx/stream-conf.d
     
-    # Основной конфиг Nginx с явной загрузкой модуля stream
+    # ВАЖНО: НЕ используем load_module — модуль уже загружается через modules-enabled
     cat > /etc/nginx/nginx.conf <<NGINX
-# Загрузка модуля stream (должна быть в самом верху!)
-load_module modules/ngx_stream_module.so;
-
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -176,23 +170,19 @@ events {
 }
 
 stream {
-    # Map для SNI routing
     map \$ssl_preread_server_name \$backend {
         ${PROXY_DOMAIN} mtproto_backend;
         default website_backend;
     }
     
-    # MTProto backend (EN сервер)
     upstream mtproto_backend {
         server ${EN_SERVER_IP}:${EN_MT_PORT};
     }
     
-    # Website backend (локальный сайт или fallback)
     upstream website_backend {
         server 127.0.0.1:8080;
     }
     
-    # Stream server на 443 порту
     server {
         listen 443;
         listen [::]:443;
@@ -209,7 +199,6 @@ http {
     sendfile on;
     keepalive_timeout 65;
     
-    # Fallback website
     server {
         listen 8080 default_server;
         listen [::]:8080 default_server;
@@ -221,7 +210,6 @@ http {
         }
     }
     
-    # HTTP server для Certbot
     server {
         listen 80 default_server;
         listen [::]:80 default_server;
@@ -240,7 +228,6 @@ http {
 }
 NGINX
     
-    # Проверяем конфиг
     echo -e "  Проверка конфигурации Nginx..."
     if ! nginx -t 2>&1; then
         echo -e "${RED}✗ Ошибка в конфиге Nginx${NC}"
