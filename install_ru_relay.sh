@@ -11,33 +11,66 @@ disable_ufw() {
     command -v ufw &>/dev/null && { ufw disable 2>/dev/null || true; systemctl stop ufw 2>/dev/null || true; systemctl disable ufw 2>/dev/null || true; echo -e "${GREEN}✓ UFW отключён${NC}"; }
 }
 
+# --- Запрос режима работы ---
+ask_mode() {
+    echo -e "\n${BLUE}═══ Режим работы RU сервера ═══${NC}"
+    echo "  A) 🌐 MTProto на порту 443 (без своего домена)"
+    echo "     Используется iptables/socat для проксирования"
+    echo "     Клиент подключается к RU_IP:443"
+    echo ""
+    echo "  B) 🏠 Свой домен + Nginx на 443 + MTProto на 8443"
+    echo "     Nginx обслуживает HTTPS-сайт на 443"
+    echo "     MTProto работает на порту 8443"
+    echo "     Клиент подключается к domain.com:8443"
+    read -rp "Выбор [A]: " mode
+    case $mode in
+        B|b)
+            WORK_MODE="domain"
+            RU_MT_PORT=8443
+            ;;
+        *)
+            WORK_MODE="simple"
+            RU_MT_PORT=443
+            ;;
+    esac
+    echo -e "${GREEN}✓ Режим: $WORK_MODE, MT порт на RU: $RU_MT_PORT${NC}"
+}
+
 # --- Запрос параметров EN сервера ---
 ask_en_params() {
     echo -e "\n${BLUE}═══ Параметры EN сервера ═══${NC}"
     
-    # ВАЖНО: сохраняем RU_MT_PORT из ask_mode()
-    local SAVED_RU_MT_PORT=$RU_MT_PORT
+    # ИСПРАВЛЕНИЕ: сохраняем значения из ask_mode() ДО source
+    local NEW_WORK_MODE="$WORK_MODE"
+    local NEW_RU_MT_PORT="$RU_MT_PORT"
     
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
         echo -e "${YELLOW}Найдена предыдущая конфигурация:${NC}"
         echo "  EN IP: $EN_SERVER_IP"
-        echo "  Режим: $WORK_MODE"
-        echo "  MTProto RU: $RU_MT_PORT → EN: $EN_MT_PORT"
+        echo "  Режим (старый): $WORK_MODE"
+        echo "  MTProto RU (старый): $RU_MT_PORT → EN: $EN_MT_PORT"
         echo ""
-        read -rp "Использовать эти параметры? (Y/n): " use
+        echo -e "${YELLOW}Новый режим: $NEW_WORK_MODE, новый MT порт: $NEW_RU_MT_PORT${NC}"
+        read -rp "Использовать сохранённые параметры EN сервера? (Y/n): " use
         if [ "$use" != "n" ] && [ "$use" != "N" ]; then
-            # Восстанавливаем RU_MT_PORT из режима, а не из конфига
-            RU_MT_PORT=$SAVED_RU_MT_PORT
-            # EN_MT_PORT должен совпадать с режимом
+            # Восстанавливаем НОВЫЕ значения режима и порта
+            WORK_MODE="$NEW_WORK_MODE"
+            RU_MT_PORT="$NEW_RU_MT_PORT"
+            # EN_MT_PORT подстраиваем под новый режим
             if [ "$WORK_MODE" = "domain" ]; then
                 EN_MT_PORT=8443
             else
                 EN_MT_PORT=443
             fi
-            echo -e "${GREEN}✓ Используем сохранённые данные (порты обновлены под режим)${NC}"
+            echo -e "${GREEN}✓ Используем сохранённые данные (порты обновлены под новый режим)${NC}"
+            echo -e "  MTProto RU порт: $RU_MT_PORT"
+            echo -e "  MTProto EN порт: $EN_MT_PORT"
             return 0
         fi
+        # Если пользователь нажал "n" — тоже восстанавливаем новые значения!
+        WORK_MODE="$NEW_WORK_MODE"
+        RU_MT_PORT="$NEW_RU_MT_PORT"
     fi
     
     read -rp "IP EN сервера: " EN_SERVER_IP
@@ -58,13 +91,14 @@ ask_en_params() {
     # RU_MT_PORT уже установлен в ask_mode() — НЕ перезаписываем!
     
     echo -e "${GREEN}✓ Параметры установлены:${NC}"
+    echo -e "  Режим: $WORK_MODE"
     echo -e "  MTProto RU порт: $RU_MT_PORT"
     echo -e "  MTProto EN порт: $EN_MT_PORT"
 }
 
 # --- Запрос домена ---
 ask_domain() {
-    [ "$WORK_MODE" != "domain" ] && return 0  # Пропускаем для режима A
+    [ "$WORK_MODE" != "domain" ] && return 0
     
     echo -e "\n${BLUE}═══ Домен для HTTPS сайта ═══${NC}"
     echo "  Nginx будет обслуживать HTTPS-сайт на этом домене."
@@ -96,42 +130,17 @@ ask_ip_type() {
     echo -e "${GREEN}✓ Выбран тип: $IP_TYPE${NC}"
 }
 
-# --- Запрос режима работы ---
-ask_mode() {
-    echo -e "\n${BLUE}═══ Режим работы RU сервера ═══${NC}"
-    echo "  A) 🌐 MTProto на порту 443 (без своего домена)"
-    echo "     Используется iptables/socat для проксирования"
-    echo "     Клиент подключается к RU_IP:443"
-    echo ""
-    echo "  B) 🏠 Свой домен + Nginx на 443 + MTProto на 8443"
-    echo "     Nginx обслуживает HTTPS-сайт на 443"
-    echo "     MTProto работает на порту 8443"
-    echo "     Клиент подключается к domain.com:8443"
-    read -rp "Выбор [A]: " mode
-    case $mode in
-        B|b)
-            WORK_MODE="domain"
-            RU_MT_PORT=8443
-            ;;
-        *)
-            WORK_MODE="simple"
-            RU_MT_PORT=443
-            ;;
-    esac
-    echo -e "${GREEN}✓ Режим: $WORK_MODE, MT порт на RU: $RU_MT_PORT${NC}"
-}
-
 # --- Выбор метода relay ---
 ask_relay_method() {
     echo -e "\n${BLUE}═══ Метод relay ═══${NC}"
-    echo "  1) Nginx stream (SNI routing, рекомендуется)"
-    echo "  2) iptables (прозрачный DNAT)"
-    echo "  3) socat (стабильнее)"
+    echo "  1) iptables (прозрачный DNAT, рекомендуется)"
+    echo "  2) socat (стабильнее, виден в процессах)"
+    echo "  3) Оба метода"
     read -rp "Выбор [1]: " m
     case $m in
-        2) RELAY_METHOD="iptables" ;;
-        3) RELAY_METHOD="socat" ;;
-        *) RELAY_METHOD="nginx" ;;
+        2) RELAY_METHOD="socat" ;;
+        3) RELAY_METHOD="both" ;;
+        *) RELAY_METHOD="iptables" ;;
     esac
     echo -e "${GREEN}✓ Выбран метод: $RELAY_METHOD${NC}"
 }
@@ -141,12 +150,17 @@ install_deps() {
     echo -e "\n${YELLOW}→ Установка зависимостей...${NC}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y nginx certbot python3-certbot-nginx iptables iptables-persistent socat curl openssl dnsutils >/dev/null 2>&1
+    apt-get install -y iptables iptables-persistent socat curl openssl dnsutils >/dev/null 2>&1
+    if [ "$WORK_MODE" = "domain" ]; then
+        apt-get install -y nginx certbot python3-certbot-nginx >/dev/null 2>&1
+    fi
     echo -e "${GREEN}✓ Зависимости установлены${NC}"
 }
 
 # --- Проверка DNS ---
 check_dns() {
+    [ "$WORK_MODE" != "domain" ] && return 0
+    
     echo -e "\n${YELLOW}→ Проверка DNS записей для $PROXY_DOMAIN...${NC}"
     
     local ru_ipv4=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 ipinfo.io/ip 2>/dev/null || ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
@@ -155,19 +169,13 @@ check_dns() {
     echo -e "  RU IPv4: $ru_ipv4"
     [ -n "$ru_ipv6" ] && echo -e "  RU IPv6: $ru_ipv6"
     
-    # Проверяем A запись
     local dns_ipv4=$(dig +short $PROXY_DOMAIN A 2>/dev/null | tail -1)
     if [ -n "$dns_ipv4" ]; then
         echo -e "  DNS A: $dns_ipv4"
-        if [ "$dns_ipv4" = "$ru_ipv4" ]; then
-            echo -e "  ${GREEN}✓ A запись корректна${NC}"
-        else
-            echo -e "  ${YELLOW}⚠ A запись указывает на $dns_ipv4, а не на $ru_ipv4${NC}"
-        fi
+        [ "$dns_ipv4" = "$ru_ipv4" ] && echo -e "  ${GREEN}✓ A запись корректна${NC}" || echo -e "  ${YELLOW}⚠ A запись указывает на $dns_ipv4, а не на $ru_ipv4${NC}"
     else
         echo -e "  ${YELLOW}⚠ A запись не найдена${NC}"
     fi
-    
     # Проверяем AAAA запись
     local dns_ipv6=$(dig +short $PROXY_DOMAIN AAAA 2>/dev/null | tail -1)
     if [ -n "$dns_ipv6" ]; then
@@ -182,24 +190,67 @@ check_dns() {
     fi
     
     echo ""
-    read -rp "Продолжить? DNS должен указывать на этот сервер (y/N): " ans
+    read -rp "Продолжить? (y/N): " ans
     [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return 1; }
     return 0
 }
 
-# --- Настройка Nginx с stream модулем ---
+# --- Настройка Nginx ---
 setup_nginx() {
-    [ "$WORK_MODE" != "domain" ] && return 0  # Пропускаем для режима A
+    [ "$WORK_MODE" != "domain" ] && return 0
     
     echo -e "\n${YELLOW}→ Настройка Nginx (HTTPS сайт на 443)...${NC}"
     
-    apt-get install -y nginx certbot python3-certbot-nginx >/dev/null 2>&1
-    
-    # HTTP конфиг для Nginx (обычный HTTPS сайт, НЕ stream)
     cat > /etc/nginx/sites-available/default <<NGINX
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
+    server_name ${PROXY_DOMAIN};
+    
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+    
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINX
+    
+    mkdir -p /var/www/html
+    cat > /var/www/html/index.html <<HTML
+<!DOCTYPE html>
+<html><head><title>Welcome</title></head>
+<body><h1>Welcome to ${PROXY_DOMAIN}</h1></body></html>
+HTML
+    
+    nginx -t 2>&1 || { echo -e "${RED}✗ Ошибка конфига Nginx${NC}"; return 1; }
+    systemctl enable nginx >/dev/null 2>&1
+    systemctl restart nginx
+    echo -e "${GREEN}✓ Nginx настроен (HTTP на 80, SSL получим ниже)${NC}"
+    return 0
+}
+
+# --- Получение SSL сертификата ---
+setup_ssl() {
+    [ "$WORK_MODE" != "domain" ] && return 0
+    
+    echo -e "\n${YELLOW}→ Получение SSL сертификата для $PROXY_DOMAIN...${NC}"
+    
+    systemctl stop nginx
+    certbot certonly --standalone -d $PROXY_DOMAIN --non-interactive --agree-tos --email admin@${PROXY_DOMAIN} 2>&1 | tail -5
+    
+    if [ ! -d "/etc/letsencrypt/live/$PROXY_DOMAIN" ]; then
+        echo -e "${RED}✗ Не удалось получить сертификат${NC}"
+        systemctl start nginx
+        return 1
+    fi
+    
+    # Обновляем конфиг Nginx с SSL
+    cat > /etc/nginx/sites-available/default <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
     server_name ${PROXY_DOMAIN};
     
     location /.well-known/acme-challenge/ {
@@ -216,7 +267,6 @@ server {
     listen [::]:443 ssl http2;
     server_name ${PROXY_DOMAIN};
     
-    # SSL сертификаты (будут получены позже)
     ssl_certificate /etc/letsencrypt/live/${PROXY_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${PROXY_DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -231,37 +281,10 @@ server {
 }
 NGINX
     
-    # Создаём простую страницу
-    mkdir -p /var/www/html
-    cat > /var/www/html/index.html <<HTML
-<!DOCTYPE html>
-<html><head><title>Welcome</title></head>
-<body><h1>Welcome to ${PROXY_DOMAIN}</h1></body></html>
-HTML
-    
-    nginx -t 2>&1 || { echo -e "${RED}✗ Ошибка конфига Nginx${NC}"; return 1; }
-    systemctl enable nginx >/dev/null 2>&1
-    systemctl restart nginx
-    echo -e "${GREEN}✓ Nginx настроен (HTTPS на 443)${NC}"
-    return 0
-}
-
-# --- Получение SSL сертификата ---
-setup_ssl() {
-    [ "$WORK_MODE" != "domain" ] && return 0
-    
-    echo -e "\n${YELLOW}→ Получение SSL сертификата для $PROXY_DOMAIN...${NC}"
-    
-    systemctl stop nginx
-    certbot certonly --standalone -d $PROXY_DOMAIN --non-interactive --agree-tos --email admin@$PROXY_DOMAIN 2>&1 | tail -5
-    
-    if [ ! -d "/etc/letsencrypt/live/$PROXY_DOMAIN" ]; then
-        echo -e "${RED}✗ Не удалось получить сертификат${NC}"
-        systemctl start nginx
-        return 1
-    fi
-    
+    nginx -t 2>&1 || { echo -e "${RED}✗ Ошибка конфига Nginx с SSL${NC}"; return 1; }
     systemctl start nginx
+    systemctl reload nginx
+    
     echo "0 3 * * * certbot renew --quiet && systemctl reload nginx" | crontab -
     echo -e "${GREEN}✓ SSL сертификат получен и настроено автообновление${NC}"
     return 0
@@ -286,6 +309,7 @@ setup_iptables() {
     done
     iptables -C INPUT -p udp --dport $RU_SOCKS_PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport $RU_SOCKS_PORT -j ACCEPT
     iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+    [ "$WORK_MODE" = "domain" ] && { iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 443 -j ACCEPT; }
     
     iptables -t nat -F 2>/dev/null
     
@@ -299,7 +323,7 @@ setup_iptables() {
     iptables -t nat -A PREROUTING -p udp --dport $RU_SOCKS_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_SOCKS_PORT}
     iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p udp --dport ${EN_SOCKS_PORT} -j MASQUERADE
     
-    # MTProto — ВАЖНО: используем $RU_MT_PORT и $EN_MT_PORT
+    # MTProto
     iptables -t nat -A PREROUTING -p tcp --dport $RU_MT_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_MT_PORT}
     iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_MT_PORT} -j MASQUERADE
     
@@ -315,9 +339,6 @@ setup_socat() {
     for proto in vless socks mtproto; do
         case $proto in vless) RP=$RU_VLESS_PORT; EP=$EN_VLESS_PORT ;; socks) RP=$RU_SOCKS_PORT; EP=$EN_SOCKS_PORT ;; mtproto) RP=$RU_MT_PORT; EP=$EN_MT_PORT ;; esac
         
-        # MTProto через socat только если не Nginx
-        [ "$proto" = "mtproto" ] && [ "$RELAY_METHOD" = "nginx" ] && continue
-        
         cat > /etc/systemd/system/relay-${proto}.service <<SV
 [Unit]
 Description=${proto^^} Relay to EN
@@ -331,12 +352,12 @@ WantedBy=multi-user.target
 SV
     done
     systemctl daemon-reload
-    systemctl enable relay-vless relay-socks >/dev/null 2>&1
-    [ "$RELAY_METHOD" != "nginx" ] && systemctl enable relay-mtproto >/dev/null 2>&1
-    systemctl restart relay-vless relay-socks
-    [ "$RELAY_METHOD" != "nginx" ] && systemctl restart relay-mtproto
+    systemctl enable relay-vless relay-socks relay-mtproto >/dev/null 2>&1
+    systemctl restart relay-vless relay-socks relay-mtproto
     sleep 1
-    echo -e "${GREEN}✓ socat настроен${NC}"
+    local ok=0
+    for s in relay-vless relay-socks relay-mtproto; do systemctl is-active --quiet $s && ok=$((ok+1)); done
+    echo -e "${GREEN}✓ socat настроен (запущено $ok/3 сервисов)${NC}"
 }
 
 # --- Генерация HTML ---
@@ -350,23 +371,14 @@ generate_html() {
     read -rp "MTProto secret EN сервера: " MT_SECRET
     [ -z "$MT_SECRET" ] && MT_SECRET="ВСТАВЬТЕ_SECRET_ИЗ_EN_СЕРВЕРА"
     
-    # Определяем сервер и порт для ссылки
     if [ "$WORK_MODE" = "domain" ]; then
         MT_SERVER="$PROXY_DOMAIN"
-        MT_PORT_DISPLAY="$RU_MT_PORT"
     else
         MT_SERVER="$RU_IPV4"
-        MT_PORT_DISPLAY="$RU_MT_PORT"
     fi
+    MT_PORT_DISPLAY="$RU_MT_PORT"
     
     MT_LINK="tg://proxy?server=${MT_SERVER}&port=${MT_PORT_DISPLAY}&secret=${MT_SECRET}"
-    
-    # Определяем IP для подключения
-    case $IP_TYPE in
-        ipv4) CONNECT_IP="$RU_IPV4" ;;
-        ipv6) CONNECT_IP="$RU_IPV6" ;;
-        *) CONNECT_IP="$RU_IPV4" ;;
-    esac
     
     cat > "$HTML_FILE" <<HTML
 <!DOCTYPE html>
@@ -425,11 +437,11 @@ $([ -n "$RU_IPV6" ] && echo "<strong>RU IPv6:</strong> ${RU_IPV6}<br>")
 <div class="card">
 <h2>⚙️ Маршрутизация</h2>
 <table>
-<tr><th>Протокол</th><th>RU Порт</th><th>→ EN</th><th>Метод</th></tr>
-<tr><td><strong>MTProto</strong></td><td><strong>${RU_MT_PORT}</strong></td><td>${EN_SERVER_IP}:${EN_MT_PORT}</td><td>$([ "$WORK_MODE" = "domain" ] && echo "iptables" || echo "iptables/socat")</td></tr>
-<tr><td>VLESS</td><td>${RU_VLESS_PORT}</td><td>${EN_SERVER_IP}:${EN_VLESS_PORT}</td><td>iptables/socat</td></tr>
-<tr><td>SOCKS5</td><td>${RU_SOCKS_PORT}</td><td>${EN_SERVER_IP}:${EN_SOCKS_PORT}</td><td>iptables/socat</td></tr>
-$([ "$WORK_MODE" = "domain" ] && echo "<tr><td>HTTPS сайт</td><td>443</td><td>локально</td><td>Nginx</td></tr>")
+<tr><th>Протокол</th><th>RU Порт</th><th>→ EN</th></tr>
+<tr><td><strong>MTProto</strong></td><td><strong>${RU_MT_PORT}</strong></td><td>${EN_SERVER_IP}:${EN_MT_PORT}</td></tr>
+<tr><td>VLESS</td><td>${RU_VLESS_PORT}</td><td>${EN_SERVER_IP}:${EN_VLESS_PORT}</td></tr>
+<tr><td>SOCKS5</td><td>${RU_SOCKS_PORT}</td><td>${EN_SERVER_IP}:${EN_SOCKS_PORT}</td></tr>
+$([ "$WORK_MODE" = "domain" ] && echo "<tr><td>HTTPS сайт</td><td>443</td><td>локально (Nginx)</td></tr>")
 </table>
 </div>
 
@@ -450,7 +462,7 @@ $([ "$WORK_MODE" = "domain" ] && echo "<tr><td>HTTPS сайт</td><td>443</td><t
 
 <div class="warn">
 <h3>⚠️ Важно</h3>
-$([ "$WORK_MODE" = "domain" ] && echo "<p><strong>MTProto:</strong> подключайтесь к <strong>${PROXY_DOMAIN}:${RU_MT_PORT}</strong></p><p><strong>HTTPS сайт:</strong> доступен на <strong>https://${PROXY_DOMAIN}</strong> (порт 443)</p>" || echo "<p><strong>MTProto:</strong> подключайтесь к <strong>${RU_IPV4}:${RU_MT_PORT}</strong></p>")
+$([ "$WORK_MODE" = "domain" ] && echo "<p><strong>MTProto:</strong> подключайтесь к <strong>${PROXY_DOMAIN}:${RU_MT_PORT}</strong></p><p><strong>HTTPS сайт:</strong> доступен на <strong>https://${PROXY_DOMAIN}</strong></p>" || echo "<p><strong>MTProto:</strong> подключайтесь к <strong>${RU_IPV4}:${RU_MT_PORT}</strong></p>")
 </div>
 
 <script>
@@ -471,7 +483,7 @@ HTML
     echo -e "${GREEN}✓ HTML сгенерирован: $HTML_FILE${NC}"
 }
 
-# --- Сохранение конфига ---
+# --- Сохранение конфига (ИСПРАВЛЕНО: добавлен WORK_MODE) ---
 save_config() {
     cat > "$CONFIG_FILE" <<CONF
 EN_SERVER_IP="${EN_SERVER_IP}"
@@ -484,6 +496,7 @@ RU_MT_PORT="${RU_MT_PORT}"
 RELAY_METHOD="${RELAY_METHOD}"
 PROXY_DOMAIN="${PROXY_DOMAIN}"
 IP_TYPE="${IP_TYPE}"
+WORK_MODE="${WORK_MODE}"
 CONF
     chmod 600 "$CONFIG_FILE"
     echo -e "${GREEN}✓ Конфигурация сохранена в $CONFIG_FILE${NC}"
@@ -516,24 +529,72 @@ menu() {
         read -rp "Введите номер: " choice
         case $choice in
             1)
-            disable_ufw
-            ask_mode              # ← ПЕРВЫМ! Устанавливает WORK_MODE и RU_MT_PORT
-            ask_en_params || { read -rp "Enter..."; continue; }   # ← НЕ перезаписывает RU_MT_PORT
-            ask_domain || { read -rp "Enter..."; continue; }
-            ask_ip_type
-            ask_relay_method
-            [ "$WORK_MODE" = "domain" ] && check_dns || true
-            install_deps
-            setup_iptables
-            [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ] && setup_socat
-            [ "$WORK_MODE" = "domain" ] && { setup_nginx; setup_ssl; }
-            save_config
-            generate_html
-            echo -e "\n${GREEN}✅ НАСТРОЙКА ЗАВЕРШЕНА${NC}"
-            echo -e "HTML: ${YELLOW}$HTML_FILE${NC}"
-            echo -e "MTProto: ${YELLOW}$RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT${NC}"
-            ;;
-            # ... остальные пункты без изменений
+                disable_ufw
+                ask_mode
+                ask_en_params || { read -rp "Enter..."; continue; }
+                ask_domain || { read -rp "Enter..."; continue; }
+                ask_ip_type
+                ask_relay_method
+                [ "$WORK_MODE" = "domain" ] && check_dns || true
+                install_deps
+                setup_iptables
+                [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ] && setup_socat
+                [ "$WORK_MODE" = "domain" ] && { setup_nginx; setup_ssl; }
+                save_config
+                generate_html
+                echo -e "\n${GREEN}✅ НАСТРОЙКА ЗАВЕРШЕНА${NC}"
+                echo -e "HTML: ${YELLOW}$HTML_FILE${NC}"
+                echo -e "MTProto: ${YELLOW}$RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT${NC}"
+                ;;
+            2)
+                [ ! -f "$CONFIG_FILE" ] && { echo -e "${RED}✗ Конфиг не найден${NC}"; } || {
+                    source "$CONFIG_FILE"
+                    if [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ]; then
+                        systemctl restart relay-vless relay-socks relay-mtproto
+                        sleep 1
+                        for s in relay-vless relay-socks relay-mtproto; do
+                            systemctl is-active --quiet $s && echo -e "${GREEN}✓ $s${NC}" || echo -e "${RED}✗ $s${NC}"
+                        done
+                    fi
+                    [ "$WORK_MODE" = "domain" ] && { systemctl restart nginx; systemctl is-active --quiet nginx && echo -e "${GREEN}✓ nginx${NC}" || echo -e "${RED}✗ nginx${NC}"; }
+                    echo -e "${GREEN}✅ Перезапуск завершён${NC}"
+                }
+                ;;
+            3)
+                ask_mode
+                ask_en_params || { read -rp "Enter..."; continue; }
+                ask_domain || { read -rp "Enter..."; continue; }
+                ask_relay_method
+                setup_iptables
+                [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ] && setup_socat
+                [ "$WORK_MODE" = "domain" ] && { setup_nginx; setup_ssl; }
+                save_config
+                generate_html
+                echo -e "${GREEN}✅ Параметры обновлены${NC}"
+                ;;
+            4)
+                [ -f "$CONFIG_FILE" ] && { source "$CONFIG_FILE"; echo -e "${BLUE}EN сервер:${NC} $EN_SERVER_IP"; echo -e "${BLUE}Режим:${NC} $WORK_MODE"; echo -e "${BLUE}MT порт:${NC} $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT"; }
+                echo -e "\n${BLUE}═══ iptables NAT ═══${NC}"; iptables -t nat -L -n -v 2>&1 | grep -E "(DNAT|MASQUERADE)" || echo "Правил нет"
+                echo -e "\n${BLUE}═══ socat сервисы ═══${NC}"
+                for s in relay-vless relay-socks relay-mtproto; do systemctl is-active --quiet $s 2>/dev/null && echo -e "${GREEN}  ✓ $s${NC}" || echo -e "${RED}  ✗ $s${NC}"; done
+                [ "$WORK_MODE" = "domain" ] && { echo -e "\n${BLUE}═══ Nginx ═══${NC}"; systemctl status nginx --no-pager 2>&1 | head -5; }
+                ;;
+            5)
+                [ -f "$CONFIG_FILE" ] && { source "$CONFIG_FILE"; echo -e "${BLUE}Режим:${NC}       $WORK_MODE"; echo -e "${BLUE}EN сервер:${NC}   $EN_SERVER_IP"; echo -e "${BLUE}MTProto RU:${NC}  $RU_MT_PORT"; echo -e "${BLUE}MTProto EN:${NC}  $EN_MT_PORT"; echo -e "${BLUE}VLESS:${NC}       $RU_VLESS_PORT → $EN_SERVER_IP:$EN_VLESS_PORT"; echo -e "${BLUE}SOCKS:${NC}       $RU_SOCKS_PORT → $EN_SERVER_IP:$EN_SOCKS_PORT"; echo -e "${BLUE}Метод:${NC}       $RELAY_METHOD"; [ -n "$PROXY_DOMAIN" ] && echo -e "${BLUE}Домен:${NC}      $PROXY_DOMAIN"; echo -e "${YELLOW}HTML:${NC} $HTML_FILE"; } || echo -e "${RED}✗ Конфиг не найден${NC}"
+                ;;
+            6)
+                read -rp "${RED}Удалить relay? (y/N): ${NC}" ans
+                if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+                    systemctl stop relay-vless relay-socks relay-mtproto nginx 2>/dev/null
+                    systemctl disable relay-vless relay-socks relay-mtproto nginx 2>/dev/null
+                    rm -f /etc/systemd/system/relay-*.service "$HTML_FILE" "$CONFIG_FILE"
+                    systemctl daemon-reload
+                    iptables -t nat -F 2>/dev/null
+                    mkdir -p /etc/iptables
+                    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+                    echo -e "${GREEN}✅ Relay удалён${NC}"
+                fi
+                ;;
             0) echo "Выход..."; exit 0 ;;
             *) echo -e "${RED}Неверный выбор${NC}" ;;
         esac
