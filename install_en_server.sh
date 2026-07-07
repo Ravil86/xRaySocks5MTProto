@@ -27,6 +27,7 @@ SOCKS_USER="${SOCKS_USER}"
 SOCKS_PASS="${SOCKS_PASS}"
 MT_SECRET="${MT_SECRET}"
 TLS_DOMAIN="${TLS_DOMAIN}"
+MT_MODE="${MT_MODE}"
 VLESS_PORT="${VLESS_PORT}"
 SOCKS_PORT="${SOCKS_PORT}"
 MT_PORT="${MT_PORT}"
@@ -35,7 +36,6 @@ PUBLIC_KEY="${PUBLIC_KEY}"
 XRAY_CFG="${XRAY_CFG}"
 CONF
     chmod 600 "$CONFIG_FILE"
-    echo -e "${GREEN}✓ Конфигурация сохранена в $CONFIG_FILE${NC}"
 }
 
 # --- Запрос TLS домена ---
@@ -66,26 +66,53 @@ ask_tls_domain() {
     echo -e "${GREEN}✓ Выбран домен: $TLS_DOMAIN${NC}"
 }
 
+# --- Запрос режима MTProto ---
+ask_mtproto_mode() {
+    echo -e "\n${BLUE}═══ Режим MTProto ═══${NC}"
+    echo "  A) 🌐 MTProto на порту 443 (FakeTLS → ya.com)"
+    echo "     Простая маскировка, клиент подключается к IP:443"
+    echo ""
+    echo "  B) 🏠 MTProto на порту 8443 + свой домен"
+    echo "     Для использования с Nginx на RU сервере"
+    echo "     FakeTLS → ваш домен"
+    read -rp "Выбор [A]: " mode
+    case $mode in
+        B|b) 
+            MT_MODE="domain"
+            MT_PORT=8443
+            ;;
+        *)
+            MT_MODE="simple"
+            MT_PORT=443
+            TLS_DOMAIN="ya.com"  # Для режима A используем ya.com
+            ;;
+    esac
+    echo -e "${GREEN}✓ Режим: $MT_MODE, порт MTProto: $MT_PORT${NC}"
+}
+
 generate_params() {
     echo -e "${YELLOW}→ Генерация новых параметров...${NC}"
     SERVER_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 ipinfo.io/ip 2>/dev/null || ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-#    SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
     [ -z "$SERVER_IP" ] && SERVER_IP="unknown"
     VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
     SOCKS_USER=$(openssl rand -hex 4)
     SOCKS_PASS=$(openssl rand -hex 8)
     MT_SECRET="ee$(openssl rand -hex 15)"
     
-    # ВАЖНО: MTProto на 443, VLESS на 8443
-    MT_PORT=443
+    # Порт MTProto зависит от режима (уже установлен в ask_mtproto_mode)
     VLESS_PORT=8443
     SOCKS_PORT=10808
+
+    # Если режим "domain" — спрашиваем домен для FakeTLS
+    if [ "$MT_MODE" = "domain" ]; then
+        echo -e "\n${BLUE}═══ Домен для FakeTLS (MTProto) ═══${NC}"
+        read -rp "Ваш домен (например proxy.mydomain.com): " TLS_DOMAIN
+        [ -z "$TLS_DOMAIN" ] && TLS_DOMAIN="ya.com"
+    fi
 
     XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
     echo -e "  Генерация x25519 ключей..."
     KEY_OUTPUT=$("$XRAY_BIN" x25519 2>&1)
-    echo "$KEY_OUTPUT" | sed 's/^/    /'
-
     PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE "Private" | sed -E 's/.*:[[:space:]]*//' | tr -d '[:space:]')
     PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE "Public" | sed -E 's/.*:[[:space:]]*//' | tr -d '[:space:]')
 
@@ -94,19 +121,14 @@ generate_params() {
         PUBLIC_KEY=$(echo "$KEY_OUTPUT" | awk '/[Pp]ublic/{print $NF}' | tr -d '[:space:]')
     fi
 
-    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ] || [ ${#PRIVATE_KEY} -lt 30 ]; then
-        echo -e "${RED}✗ ОШИБКА: не удалось получить ключи!${NC}"
-        return 1
-    fi
+    [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ] || [ ${#PRIVATE_KEY} -lt 30 ] && { echo -e "${RED}✗ Ошибка генерации ключей${NC}"; return 1; }
 
     echo -e "${GREEN}✓ Параметры сгенерированы:${NC}"
-    echo -e "  IP: $SERVER_IP"
-    echo -e "  UUID: $VLESS_UUID"
-    echo -e "  SOCKS: $SOCKS_USER / $SOCKS_PASS"
+    echo -e "  Режим MTProto: $MT_MODE"
+    echo -e "  MTProto порт: $MT_PORT"
     echo -e "  MTProto secret: $MT_SECRET"
-    echo -e "  MTProto порт: $MT_PORT (FakeTLS → $TLS_DOMAIN)"
-    echo -e "  VLESS порт: $VLESS_PORT (REALITY → $TLS_DOMAIN)"
-    echo -e "  Public Key: ${PUBLIC_KEY:0:20}..."
+    echo -e "  TLS домен: $TLS_DOMAIN"
+    echo -e "  VLESS порт: $VLESS_PORT"
     return 0
 }
 
@@ -252,7 +274,7 @@ setup_mtg() {
 }
 
 configure_mtg() {
-    echo -e "${YELLOW}→ Настройка systemd сервиса MTProto (FakeTLS → ${TLS_DOMAIN}, порт ${MT_PORT})...${NC}"
+    echo -e "${YELLOW}→ Настройка MTProto (FakeTLS → ${TLS_DOMAIN}, порт ${MT_PORT})...${NC}"
     
     cat > /etc/systemd/system/mtg.service <<MT
 [Unit]
@@ -272,7 +294,7 @@ MT
     systemctl restart mtg
     sleep 1
     
-    systemctl is-active --quiet mtg && echo -e "${GREEN}✓ MTProto запущен на порту ${MT_PORT} (FakeTLS → ${TLS_DOMAIN})${NC}" || { echo -e "${RED}✗ MTProto не запустился!${NC}"; journalctl -u mtg -n 15 --no-pager; return 1; }
+    systemctl is-active --quiet mtg && echo -e "${GREEN}✓ MTProto запущен на порту ${MT_PORT}${NC}" || { echo -e "${RED}✗ MTProto не запустился${NC}"; journalctl -u mtg -n 15 --no-pager; return 1; }
     return 0
 }
 
@@ -442,6 +464,7 @@ do_full_install() {
     fi
     
     disable_ufw; install_deps; ask_tls_domain
+    ask_mtproto_mode          # ← ДОБАВЛЕНО
     setup_xray || return; generate_params || return; configure_xray || return
     setup_mtg || return; configure_mtg; setup_fw; save_config; generate_html
     
