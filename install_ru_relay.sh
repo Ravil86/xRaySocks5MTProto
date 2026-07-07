@@ -101,8 +101,8 @@ install_deps() {
 check_dns() {
     echo -e "\n${YELLOW}→ Проверка DNS записей для $PROXY_DOMAIN...${NC}"
     
-    local ru_ipv4=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
-    local ru_ipv6=$(curl -s --max-time 5 -6 ifconfig.me 2>/dev/null || echo "")
+    local ru_ipv4=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 ipinfo.io/ip 2>/dev/null || ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+    local ru_ipv6=$(curl -6 -s --max-time 5 ifconfig.me 2>/dev/null || ip -6 addr show scope global | grep -oP '(?<=inet6\s)[\da-f:]+' | head -1)
     
     echo -e "  RU IPv4: $ru_ipv4"
     [ -n "$ru_ipv6" ] && echo -e "  RU IPv6: $ru_ipv6"
@@ -344,8 +344,8 @@ SV
 # --- Генерация HTML ---
 generate_html() {
     echo -e "\n${YELLOW}→ Генерация HTML-файла...${NC}"
-    RU_IPV4=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
-    RU_IPV6=$(curl -s --max-time 5 -6 ifconfig.me 2>/dev/null || echo "")
+    RU_IPV4=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 ipinfo.io/ip 2>/dev/null || ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+    RU_IPV6=$(curl -6 -s --max-time 5 ifconfig.me 2>/dev/null || ip -6 addr show scope global | grep -oP '(?<=inet6\s)[\da-f:]+' | head -1)
     [ -z "$RU_IPV4" ] && RU_IPV4="unknown"
     
     echo -e "\n${BLUE}═══ Параметры MTProto для Telegram ═══${NC}"

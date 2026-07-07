@@ -68,7 +68,8 @@ ask_tls_domain() {
 
 generate_params() {
     echo -e "${YELLOW}→ Генерация новых параметров...${NC}"
-    SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
+    SERVER_IP=$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || curl -4 -s --max-time 5 ipinfo.io/ip 2>/dev/null || ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+#    SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
     [ -z "$SERVER_IP" ] && SERVER_IP="unknown"
     VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
     SOCKS_USER=$(openssl rand -hex 4)
