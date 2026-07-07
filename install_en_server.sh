@@ -9,97 +9,171 @@ HTML_FILE="/root/proxy_settings.html"
 MT_DIR="/opt/MTProxy"
 MT_CONF="/etc/mtproto"
 
-echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║   ПРОСТАЯ УСТАНОВКА EN СЕРВЕРА         ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-
-# 1. Отключение UFW
-echo -e "\n${YELLOW}[1/8] Отключение UFW...${NC}"
-if command -v ufw &>/dev/null; then
-    ufw disable 2>/dev/null || true
-    systemctl stop ufw 2>/dev/null || true
-    systemctl disable ufw 2>/dev/null || true
-    echo -e "${GREEN}✓ UFW отключён${NC}"
-else
-    echo -e "${GREEN}✓ UFW не установлен${NC}"
-fi
-
-# 2. Зависимости
-echo -e "\n${YELLOW}[2/8] Установка зависимостей...${NC}"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y >/dev/null 2>&1
-apt-get install -y curl wget jq openssl git build-essential cmake libssl-dev zlib1g-dev iptables >/dev/null 2>&1
-echo -e "${GREEN}✓ Зависимости установлены${NC}"
-
-# 3. Установка Xray
-echo -e "\n${YELLOW}[3/8] Установка Xray-core...${NC}"
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install 2>&1 | tail -5
-
-XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
-echo -e "  Xray binary: $XRAY_BIN"
-
-XRAY_CFG=""
-for path in "/usr/local/etc/xray/config.json" "/etc/xray/config.json" "/usr/local/share/xray/config.json"; do
-    dir=$(dirname "$path")
-    if [ -d "$dir" ] || [ -f "$path" ]; then
-        XRAY_CFG="$path"
-        echo -e "  Найден путь конфига: $XRAY_CFG"
-        break
+# --- Проверка компонентов ---
+check_installed() {
+    echo -e "${BLUE}=== Статус компонентов ===${NC}"
+    if command -v xray &>/dev/null; then
+        echo -e "  ${GREEN}✓ Xray: $(xray version 2>/dev/null | head -1)${NC}"
+    else
+        echo -e "  ${RED}✗ Xray не установлен${NC}"
     fi
-done
+    if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
+        echo -e "  ${GREEN}✓ MTProto: запущен${NC}"
+    elif [ -f "$MT_DIR/objs/bin/mtproto-proxy" ]; then
+        echo -e "  ${YELLOW}⚠ MTProto: установлен, но не запущен${NC}"
+    else
+        echo -e "  ${RED}✗ MTProto: не установлен${NC}"
+    fi
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "  ${GREEN}✓ Конфигурация сохранена: $CONFIG_FILE${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ Конфигурация не найдена${NC}"
+    fi
+    if [ -f "$HTML_FILE" ]; then
+        echo -e "  ${GREEN}✓ HTML-файл: $HTML_FILE${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ HTML не сгенерирован${NC}"
+    fi
+    echo ""
+}
 
-if [ -z "$XRAY_CFG" ]; then
-    echo -e "  ${YELLOW}Путь конфига не найден, создаём /usr/local/etc/xray/...${NC}"
-    mkdir -p /usr/local/etc/xray
-    XRAY_CFG="/usr/local/etc/xray/config.json"
-fi
+# --- Загрузка/сохранение конфига ---
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        return 0
+    fi
+    return 1
+}
 
-XRAY_DIR=$(dirname "$XRAY_CFG")
-[ ! -d "$XRAY_DIR" ] && mkdir -p "$XRAY_DIR"
-chmod 755 "$XRAY_DIR"
+save_config() {
+    cat > "$CONFIG_FILE" <<CONF
+SERVER_IP="${SERVER_IP}"
+VLESS_UUID="${VLESS_UUID}"
+SOCKS_USER="${SOCKS_USER}"
+SOCKS_PASS="${SOCKS_PASS}"
+MT_SECRET="${MT_SECRET}"
+MT_TAG="${MT_TAG}"
+VLESS_PORT="${VLESS_PORT}"
+SOCKS_PORT="${SOCKS_PORT}"
+MT_PORT="${MT_PORT}"
+PRIVATE_KEY="${PRIVATE_KEY}"
+PUBLIC_KEY="${PUBLIC_KEY}"
+XRAY_CFG="${XRAY_CFG}"
+CONF
+    chmod 600 "$CONFIG_FILE"
+    echo -e "${GREEN}✓ Конфигурация сохранена в $CONFIG_FILE${NC}"
+}
 
-echo -e "${GREEN}✓ Xray установлен. Путь конфига: $XRAY_CFG${NC}"
+# --- Генерация параметров ---
+generate_params() {
+    echo -e "${YELLOW}→ Генерация новых параметров...${NC}"
+    SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
+    [ -z "$SERVER_IP" ] && SERVER_IP="unknown"
+    VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
+    SOCKS_USER=$(openssl rand -hex 4)
+    SOCKS_PASS=$(openssl rand -hex 8)
+    MT_SECRET="dd$(openssl rand -hex 16)"
+    MT_TAG="ee$(openssl rand -hex 8)"
+    VLESS_PORT=443
+    SOCKS_PORT=10808
+    MT_PORT=8888
 
-# 4. Генерация параметров
-echo -e "\n${YELLOW}[4/8] Генерация параметров...${NC}"
-SERVER_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
-VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
-SOCKS_USER=$(openssl rand -hex 4)          # КОРОТКИЙ ЛОГИН (8 символов)
-SOCKS_PASS=$(openssl rand -hex 8)          # КОРОТКИЙ ПАРОЛЬ (16 символов)
-MT_SECRET="dd$(openssl rand -hex 16)"
-MT_TAG="ee$(openssl rand -hex 8)"
-VLESS_PORT=443
-SOCKS_PORT=10808
-MT_PORT=8888
+    XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
+    echo -e "  Генерация x25519 ключей..."
+    KEY_OUTPUT=$("$XRAY_BIN" x25519 2>&1)
+    echo "$KEY_OUTPUT" | sed 's/^/    /'
 
-echo -e "  Генерация x25519 ключей..."
-KEY_OUTPUT=$("$XRAY_BIN" x25519 2>&1)
-echo "$KEY_OUTPUT" | sed 's/^/    /'
+    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE "Private" | sed -E 's/.*:[[:space:]]*//' | tr -d '[:space:]')
+    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE "Public" | sed -E 's/.*:[[:space:]]*//' | tr -d '[:space:]')
 
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE "Private" | sed -E 's/.*:[[:space:]]*//' | tr -d '[:space:]')
-PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE "Public" | sed -E 's/.*:[[:space:]]*//' | tr -d '[:space:]')
+    if [ -z "$PRIVATE_KEY" ] || [ ${#PRIVATE_KEY} -lt 30 ]; then
+        PRIVATE_KEY=$(echo "$KEY_OUTPUT" | awk '/[Pp]rivate/{print $NF}' | tr -d '[:space:]')
+        PUBLIC_KEY=$(echo "$KEY_OUTPUT" | awk '/[Pp]ublic/{print $NF}' | tr -d '[:space:]')
+    fi
 
-if [ -z "$PRIVATE_KEY" ] || [ ${#PRIVATE_KEY} -lt 30 ]; then
-    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | awk '/[Pp]rivate/{print $NF}' | tr -d '[:space:]')
-    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | awk '/[Pp]ublic/{print $NF}' | tr -d '[:space:]')
-fi
+    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ] || [ ${#PRIVATE_KEY} -lt 30 ]; then
+        echo -e "${RED}✗ ОШИБКА: не удалось получить ключи!${NC}"
+        return 1
+    fi
 
-if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ] || [ ${#PRIVATE_KEY} -lt 30 ]; then
-    echo -e "${RED}✗ ОШИБКА: не удалось получить ключи!${NC}"
-    exit 1
-fi
+    echo -e "${GREEN}✓ Параметры сгенерированы:${NC}"
+    echo -e "  IP: $SERVER_IP"
+    echo -e "  UUID: $VLESS_UUID"
+    echo -e "  SOCKS логин: $SOCKS_USER"
+    echo -e "  SOCKS пароль: $SOCKS_PASS"
+    echo -e "  Private Key: ${PRIVATE_KEY:0:20}..."
+    echo -e "  Public Key: ${PUBLIC_KEY:0:20}..."
+    return 0
+}
 
-echo -e "${GREEN}✓ Параметры сгенерированы:${NC}"
-echo -e "  IP: $SERVER_IP"
-echo -e "  UUID: $VLESS_UUID"
-echo -e "  SOCKS логин: $SOCKS_USER (короткий)"
-echo -e "  SOCKS пароль: $SOCKS_PASS (короткий)"
-echo -e "  Private Key: ${PRIVATE_KEY:0:20}..."
-echo -e "  Public Key: ${PUBLIC_KEY:0:20}..."
+# --- Отключение UFW ---
+disable_ufw() {
+    if command -v ufw &>/dev/null; then
+        echo -e "${YELLOW}→ Отключение UFW...${NC}"
+        ufw disable 2>/dev/null || true
+        systemctl stop ufw 2>/dev/null || true
+        systemctl disable ufw 2>/dev/null || true
+        echo -e "${GREEN}✓ UFW отключён${NC}"
+    fi
+}
 
-# 5. Создание конфига Xray
-echo -e "\n${YELLOW}[5/8] Создание конфигурации Xray...${NC}"
-cat > "$XRAY_CFG" <<XRAY
+# --- Установка зависимостей ---
+install_deps() {
+    echo -e "${YELLOW}→ Установка зависимостей...${NC}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y curl wget jq openssl git build-essential cmake libssl-dev zlib1g-dev iptables >/dev/null 2>&1
+    echo -e "${GREEN}✓ Зависимости установлены${NC}"
+}
+
+# --- Установка Xray ---
+setup_xray() {
+    echo -e "${YELLOW}→ Установка/обновление Xray-core...${NC}"
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install 2>&1 | tail -5
+
+    XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
+    echo -e "  Xray binary: $XRAY_BIN"
+
+    XRAY_CFG=""
+    for path in "/usr/local/etc/xray/config.json" "/etc/xray/config.json" "/usr/local/share/xray/config.json"; do
+        dir=$(dirname "$path")
+        if [ -d "$dir" ] || [ -f "$path" ]; then
+            XRAY_CFG="$path"
+            echo -e "  Найден путь конфига: $XRAY_CFG"
+            break
+        fi
+    done
+
+    if [ -z "$XRAY_CFG" ]; then
+        echo -e "  ${YELLOW}Путь конфига не найден, создаём /usr/local/etc/xray/...${NC}"
+        mkdir -p /usr/local/etc/xray
+        XRAY_CFG="/usr/local/etc/xray/config.json"
+    fi
+
+    XRAY_DIR=$(dirname "$XRAY_CFG")
+    [ ! -d "$XRAY_DIR" ] && mkdir -p "$XRAY_DIR"
+    chmod 755 "$XRAY_DIR"
+
+    if command -v xray &>/dev/null; then
+        echo -e "${GREEN}✓ Xray установлен: $(xray version 2>/dev/null | head -1)${NC}"
+    else
+        echo -e "${RED}✗ ОШИБКА: Xray не установлен!${NC}"
+        return 1
+    fi
+    return 0
+}
+
+# --- Конфигурация Xray ---
+configure_xray() {
+    echo -e "${YELLOW}→ Запись конфигурации Xray...${NC}"
+    
+    if [ -z "$VLESS_UUID" ] || [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+        echo -e "${RED}✗ ОШИБКА: Не все параметры сгенерированы!${NC}"
+        return 1
+    fi
+
+    cat > "$XRAY_CFG" <<XRAY
 {
   "log": {"loglevel": "warning"},
   "inbounds": [
@@ -141,50 +215,65 @@ cat > "$XRAY_CFG" <<XRAY
 }
 XRAY
 
-[ ! -f "$XRAY_CFG" ] && { echo -e "${RED}✗ Файл конфига не создан!${NC}"; exit 1; }
-echo -e "  ✓ Файл создан: $(ls -lh "$XRAY_CFG" | awk '{print $5, $9}')"
+    [ ! -f "$XRAY_CFG" ] && { echo -e "${RED}✗ Файл конфига не создан!${NC}"; return 1; }
+    echo -e "  ✓ Файл создан: $(ls -lh "$XRAY_CFG" | awk '{print $5, $9}')"
 
-TEST_OUT=$("$XRAY_BIN" run -test -config "$XRAY_CFG" 2>&1)
-if echo "$TEST_OUT" | grep -qi "ok\|valid\|success"; then
-    echo -e "${GREEN}✓ Конфиг валиден${NC}"
-else
-    echo -e "${YELLOW}⚠ Вывод проверки:${NC}"
-    echo "$TEST_OUT" | sed 's/^/    /'
-fi
+    XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
+    TEST_OUT=$("$XRAY_BIN" run -test -config "$XRAY_CFG" 2>&1)
+    if echo "$TEST_OUT" | grep -qi "ok\|valid\|success"; then
+        echo -e "${GREEN}✓ Конфиг валиден${NC}"
+    else
+        echo -e "${YELLOW}⚠ Вывод проверки:${NC}"
+        echo "$TEST_OUT" | sed 's/^/    /'
+    fi
 
-if [ -f "/etc/systemd/system/xray.service" ]; then
-    sed -i "s|/usr/local/etc/xray/config.json|$XRAY_CFG|g" /etc/systemd/system/xray.service 2>/dev/null || true
-    sed -i "s|/etc/xray/config.json|$XRAY_CFG|g" /etc/systemd/system/xray.service 2>/dev/null || true
-    systemctl daemon-reload
-fi
+    if [ -f "/etc/systemd/system/xray.service" ]; then
+        sed -i "s|/usr/local/etc/xray/config.json|$XRAY_CFG|g" /etc/systemd/system/xray.service 2>/dev/null || true
+        sed -i "s|/etc/xray/config.json|$XRAY_CFG|g" /etc/systemd/system/xray.service 2>/dev/null || true
+        systemctl daemon-reload
+    fi
 
-systemctl enable xray >/dev/null 2>&1
-systemctl restart xray
-sleep 2
+    systemctl enable xray >/dev/null 2>&1
+    systemctl restart xray
+    sleep 2
 
-if systemctl is-active --quiet xray; then
-    echo -e "${GREEN}✓ Xray запущен${NC}"
-else
-    echo -e "${RED}✗ Xray не запустился!${NC}"
-    journalctl -u xray -n 20 --no-pager 2>&1
-    exit 1
-fi
+    if systemctl is-active --quiet xray; then
+        echo -e "${GREEN}✓ Xray запущен (VLESS:${VLESS_PORT}, SOCKS:${SOCKS_PORT})${NC}"
+    else
+        echo -e "${RED}✗ Xray не запустился!${NC}"
+        journalctl -u xray -n 15 --no-pager
+        return 1
+    fi
+    return 0
+}
 
-# 6. MTProto
-echo -e "\n${YELLOW}[6/8] Компиляция MTProto Proxy...${NC}"
-[ ! -d "$MT_DIR" ] && { cd /opt && git clone https://github.com/TelegramMessenger/MTProxy.git >/dev/null 2>&1; }
-cd "$MT_DIR"
-make clean >/dev/null 2>&1
-make -j$(nproc) >/dev/null 2>&1
-[ ! -f "$MT_DIR/objs/bin/mtproto-proxy" ] && { echo -e "${RED}✗ Ошибка компиляции MTProto${NC}"; exit 1; }
-echo -e "${GREEN}✓ MTProto скомпилирован${NC}"
+# --- Установка MTProto ---
+setup_mtproto() {
+    echo -e "${YELLOW}→ Компиляция MTProto Proxy...${NC}"
+    if [ ! -d "$MT_DIR" ]; then
+        cd /opt && git clone https://github.com/TelegramMessenger/MTProxy.git >/dev/null 2>&1
+    fi
+    cd "$MT_DIR"
+    make clean >/dev/null 2>&1
+    make -j$(nproc) >/dev/null 2>&1
+    if [ ! -f "$MT_DIR/objs/bin/mtproto-proxy" ]; then
+        echo -e "${RED}✗ Ошибка компиляции MTProto${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ MTProto скомпилирован${NC}"
 
-mkdir -p "$MT_CONF"
-cd "$MT_CONF"
-curl -s https://core.telegram.org/getProxySecret -o proxy-secret
-curl -s https://core.telegram.org/getProxyConfig -o proxy-multi.conf
+    mkdir -p "$MT_CONF"
+    cd "$MT_CONF"
+    curl -s https://core.telegram.org/getProxySecret -o proxy-secret
+    curl -s https://core.telegram.org/getProxyConfig -o proxy-multi.conf
+    echo -e "${GREEN}✓ Конфигурация Telegram загружена${NC}"
+    return 0
+}
 
-cat > /etc/systemd/system/mtproto-proxy.service <<MT
+# --- Настройка сервиса MTProto ---
+configure_mtproto() {
+    echo -e "${YELLOW}→ Настройка systemd сервиса MTProto...${NC}"
+    cat > /etc/systemd/system/mtproto-proxy.service <<MT
 [Unit]
 Description=MTProto Proxy
 After=network.target
@@ -196,64 +285,55 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 MT
+    systemctl daemon-reload
+    systemctl enable mtproto-proxy >/dev/null 2>&1
+    systemctl restart mtproto-proxy
+    sleep 1
+    if systemctl is-active --quiet mtproto-proxy; then
+        echo -e "${GREEN}✓ MTProto запущен на порту ${MT_PORT}${NC}"
+    else
+        echo -e "${YELLOW}⚠ MTProto не запустился (не критично)${NC}"
+    fi
+    return 0
+}
 
-systemctl daemon-reload
-systemctl enable mtproto-proxy >/dev/null 2>&1
-systemctl restart mtproto-proxy
-sleep 1
-systemctl is-active --quiet mtproto-proxy && echo -e "${GREEN}✓ MTProto запущен на порту ${MT_PORT}${NC}" || echo -e "${YELLOW}⚠ MTProto не запустился (не критично)${NC}"
+# --- Файрвол ---
+setup_fw() {
+    echo -e "${YELLOW}→ Настройка iptables...${NC}"
+    SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    SSH_PORT=${SSH_PORT:-22}
 
-# 7. iptables
-echo -e "\n${YELLOW}[7/8] Настройка iptables...${NC}"
-SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
-SSH_PORT=${SSH_PORT:-22}
+    iptables -C INPUT -p tcp --dport $SSH_PORT -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT 1 -p tcp --dport $SSH_PORT -j ACCEPT
+    iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT 1 -i lo -j ACCEPT
+    iptables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -C INPUT -p tcp --dport $SSH_PORT -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 1 -p tcp --dport $SSH_PORT -j ACCEPT
-iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 1 -i lo -j ACCEPT
-iptables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
-    iptables -I INPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
+    for port in $VLESS_PORT $SOCKS_PORT $MT_PORT; do
+        iptables -C INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || \
+            iptables -A INPUT -p tcp --dport $port -j ACCEPT
+    done
+    iptables -C INPUT -p udp --dport $SOCKS_PORT -j ACCEPT 2>/dev/null || \
+        iptables -A INPUT -p udp --dport $SOCKS_PORT -j ACCEPT
 
-for port in $VLESS_PORT $SOCKS_PORT $MT_PORT; do
-    iptables -C INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || \
-        iptables -A INPUT -p tcp --dport $port -j ACCEPT
-done
-iptables -C INPUT -p udp --dport $SOCKS_PORT -j ACCEPT 2>/dev/null || \
-    iptables -A INPUT -p udp --dport $SOCKS_PORT -j ACCEPT
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
+    if ! dpkg -l | grep -q iptables-persistent; then
+        echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+        apt-get install -y iptables-persistent >/dev/null 2>&1
+    fi
+    echo -e "${GREEN}✓ iptables настроен (SSH:${SSH_PORT}, VLESS:${VLESS_PORT}, SOCKS:${SOCKS_PORT}, MT:${MT_PORT})${NC}"
+}
 
-mkdir -p /etc/iptables
-iptables-save > /etc/iptables/rules.v4 2>/dev/null
-if ! dpkg -l | grep -q iptables-persistent; then
-    echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
-    apt-get install -y iptables-persistent >/dev/null 2>&1
-fi
-echo -e "${GREEN}✓ iptables настроен (SSH:${SSH_PORT}, прокси-порты открыты)${NC}"
+# --- Генерация HTML ---
+generate_html() {
+    echo -e "${YELLOW}→ Генерация HTML-файла...${NC}"
+    VLESS_LINK="vless://${VLESS_UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=&type=tcp&flow=xtls-rprx-vision#EN_VLESS"
+    SOCKS_LINK="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${SOCKS_PORT}#EN_SOCKS5"
+    MT_LINK="tg://proxy?server=${SERVER_IP}&port=${MT_PORT}&secret=${MT_SECRET}${MT_TAG}"
 
-# 8. Сохранение и HTML
-echo -e "\n${YELLOW}[8/8] Сохранение конфига и генерация HTML...${NC}"
-cat > "$CONFIG_FILE" <<CONF
-SERVER_IP="${SERVER_IP}"
-VLESS_UUID="${VLESS_UUID}"
-SOCKS_USER="${SOCKS_USER}"
-SOCKS_PASS="${SOCKS_PASS}"
-MT_SECRET="${MT_SECRET}"
-MT_TAG="${MT_TAG}"
-VLESS_PORT="${VLESS_PORT}"
-SOCKS_PORT="${SOCKS_PORT}"
-MT_PORT="${MT_PORT}"
-PRIVATE_KEY="${PRIVATE_KEY}"
-PUBLIC_KEY="${PUBLIC_KEY}"
-XRAY_CFG="${XRAY_CFG}"
-CONF
-chmod 600 "$CONFIG_FILE"
-
-VLESS_LINK="vless://${VLESS_UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=&type=tcp&flow=xtls-rprx-vision#EN_VLESS"
-SOCKS_LINK="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${SOCKS_PORT}#EN_SOCKS5"
-MT_LINK="tg://proxy?server=${SERVER_IP}&port=${MT_PORT}&secret=${MT_SECRET}${MT_TAG}"
-
-# HTML с кнопками копирования для КАЖДОГО значения
-cat > "$HTML_FILE" <<HTML
+    cat > "$HTML_FILE" <<HTML
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -336,18 +416,274 @@ function cp(b,t){
 </script>
 </body></html>
 HTML
+    echo -e "${GREEN}✓ HTML сгенерирован: $HTML_FILE${NC}"
+}
 
-echo -e "${GREEN}✓ HTML сгенерирован: $HTML_FILE${NC}"
+# --- ПУНКТ 1: Полная установка (с проверкой сохранённых данных) ---
+do_full_install() {
+    echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║      ПОЛНАЯ УСТАНОВКА EN СЕРВЕРА       ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+    
+    # Проверяем наличие сохранённого конфига
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
+        echo -e "${YELLOW}⚠ Обнаружена существующая конфигурация:${NC}"
+        echo -e "  IP:          $SERVER_IP"
+        echo -e "  UUID:        $VLESS_UUID"
+        echo -e "  Public Key:  ${PUBLIC_KEY:0:30}..."
+        echo -e "  SOCKS user:  $SOCKS_USER"
+        echo -e "  SOCKS pass:  $SOCKS_PASS"
+        echo -e "  MT secret:   ${MT_SECRET:0:20}..."
+        echo -e "  Порты:       VLESS=$VLESS_PORT, SOCKS=$SOCKS_PORT, MT=$MT_PORT"
+        echo ""
+        echo -e "${YELLOW}Что сделать?${NC}"
+        echo "  1) 🔄 Использовать СОХРАНЁННЫЕ данные (перезаписать конфиги, ключи те же)"
+        echo "  2) 🆕 Сгенерировать НОВЫЕ данные (старые будут потеряны)"
+        echo "  0) Отмена"
+        echo ""
+        read -rp "Ваш выбор [1]: " mode
+        mode=${mode:-1}
+        
+        case $mode in
+            2)
+                echo -e "${YELLOW}→ Будут сгенерированы новые ключи...${NC}"
+                read -rp "Вы уверены? Все клиенты потеряют подключение (y/N): " ans
+                [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
+                # Продолжаем ниже — полная установка с новыми ключами
+                ;;
+            1)
+                echo -e "${GREEN}→ Используем сохранённые данные${NC}"
+                disable_ufw
+                install_deps
+                setup_xray || return
+                
+                # Проверяем, что все нужные переменные есть
+                if [ -z "$VLESS_UUID" ] || [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+                    echo -e "${RED}✗ Сохранённые данные повреждены. Перегенерируем...${NC}"
+                    generate_params || return
+                fi
+                
+                configure_xray || return
+                setup_mtproto || return
+                configure_mtproto
+                setup_fw
+                save_config
+                generate_html
+                
+                echo -e "\n${GREEN}════════════════════════════════════════${NC}"
+                echo -e "${GREEN}✅ КОНФИГУРАЦИИ ПЕРЕЗАПИСАНЫ С ТЕМИ ЖЕ КЛЮЧАМИ${NC}"
+                echo -e "${GREEN}════════════════════════════════════════${NC}"
+                echo -e "HTML-файл: ${YELLOW}$HTML_FILE${NC}"
+                return
+                ;;
+            *)
+                echo "Отменено"
+                return
+                ;;
+        esac
+    else
+        read -rp "Начать полную установку? (y/N): " ans
+        [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
+    fi
+    
+    # Полная установка с новыми ключами
+    disable_ufw
+    install_deps
+    setup_xray || { echo -e "${RED}✗ Установка Xray провалена${NC}"; return; }
+    generate_params || { echo -e "${RED}✗ Генерация параметров провалена${NC}"; return; }
+    configure_xray || { echo -e "${RED}✗ Конфигурация Xray провалена${NC}"; return; }
+    setup_mtproto || { echo -e "${RED}✗ Установка MTProto провалена${NC}"; return; }
+    configure_mtproto
+    setup_fw
+    save_config
+    generate_html
+    
+    echo -e "\n${GREEN}════════════════════════════════════════${NC}"
+    echo -e "${GREEN}✅ УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО${NC}"
+    echo -e "${GREEN}════════════════════════════════════════${NC}"
+    echo -e "HTML-файл: ${YELLOW}$HTML_FILE${NC}"
+}
 
-echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║      ✅ УСТАНОВКА ЗАВЕРШЕНА              ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-echo -e "HTML-файл: ${YELLOW}$HTML_FILE${NC}"
-echo -e "Конфиг:    ${YELLOW}$CONFIG_FILE${NC}"
-echo -e "Xray конфиг: ${YELLOW}$XRAY_CFG${NC}"
-echo -e ""
-echo -e "${BLUE}Статус сервисов:${NC}"
-systemctl is-active xray mtproto-proxy 2>/dev/null | awk '{print "  " $0}'
-echo -e ""
-echo -e "${BLUE}Открытые порты:${NC}"
-ss -tlnp | grep -E ":(443|10808|8888)" | awk '{print "  " $4}'
+# --- ПУНКТ 2: Перезапуск ---
+do_restart() {
+    echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║         ПЕРЕЗАПУСК СЕРВИСОВ            ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+    
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}✗ Сохранённая конфигурация не найдена!${NC}"
+        echo -e "${YELLOW}Сначала выполните полную установку (пункт 1)${NC}"
+        return
+    fi
+    
+    source "$CONFIG_FILE"
+    echo -e "${BLUE}Используем сохранённые параметры:${NC}"
+    echo "  UUID: ${VLESS_UUID:0:20}..."
+    echo "  Public Key: ${PUBLIC_KEY:0:20}..."
+    echo ""
+    
+    echo -e "${YELLOW}→ Перезапуск Xray...${NC}"
+    systemctl restart xray 2>&1
+    sleep 2
+    if systemctl is-active --quiet xray; then
+        echo -e "${GREEN}  ✓ Xray перезапущен${NC}"
+    else
+        echo -e "${RED}  ✗ Xray не запустился. Логи:${NC}"
+        journalctl -u xray -n 10 --no-pager
+    fi
+    
+    echo -e "${YELLOW}→ Перезапуск MTProto...${NC}"
+    systemctl restart mtproto-proxy 2>&1
+    sleep 1
+    if systemctl is-active --quiet mtproto-proxy; then
+        echo -e "${GREEN}  ✓ MTProto перезапущен${NC}"
+    else
+        echo -e "${RED}  ✗ MTProto не запустился${NC}"
+    fi
+    
+    echo -e "\n${GREEN}✅ Перезапуск завершён${NC}"
+}
+
+# --- ПУНКТ 3: Перегенерация ключей ---
+do_regen_keys() {
+    echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║      ПЕРЕГЕНЕРАЦИЯ КЛЮЧЕЙ И ССЫЛОК     ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+    
+    if ! load_config; then
+        echo -e "${RED}✗ Конфигурация не найдена. Сначала выполните полную установку (п.1)${NC}"
+        return
+    fi
+    
+    echo -e "${YELLOW}Старые параметры:${NC}"
+    echo "  UUID: $VLESS_UUID"
+    echo "  Public Key: $PUBLIC_KEY"
+    echo "  SOCKS user: $SOCKS_USER"
+    echo "  SOCKS pass: $SOCKS_PASS"
+    echo "  MTProto secret: $MT_SECRET"
+    
+    read -rp "Сгенерировать новые ключи? (y/N): " ans
+    [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
+    
+    generate_params || return
+    configure_xray || return
+    configure_mtproto
+    save_config
+    generate_html
+    
+    echo -e "\n${GREEN}════════════════════════════════════════${NC}"
+    echo -e "${GREEN}✅ КЛЮЧИ ПЕРЕГЕНЕРИРОВАНЫ${NC}"
+    echo -e "${GREEN}════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}⚠️  ВАЖНО: Обновите настройки во всех клиентах!${NC}"
+    echo -e "Новый HTML: ${YELLOW}$HTML_FILE${NC}"
+}
+
+# --- ПУНКТ 4: Статус ---
+do_status() {
+    echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║           СТАТУС СЕРВИСОВ              ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+    
+    echo -e "${BLUE}═══ Xray ═══${NC}"
+    systemctl status xray --no-pager 2>&1 | head -15
+    echo ""
+    echo -e "${BLUE}═══ MTProto ═══${NC}"
+    systemctl status mtproto-proxy --no-pager 2>&1 | head -15
+    echo ""
+    echo -e "${BLUE}═══ iptables правила ═══${NC}"
+    iptables -L INPUT -n -v 2>&1 | head -20
+    echo ""
+    echo -e "${BLUE}═══ Открытые порты ═══${NC}"
+    ss -tlnp | grep -E ":(443|10808|8888)" || echo "Ничего не слушает"
+}
+
+# --- ПУНКТ 5: Показать настройки ---
+do_show_config() {
+    echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║         ТЕКУЩИЕ НАСТРОЙКИ              ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+    
+    if ! load_config; then
+        echo -e "${RED}✗ Конфигурация не найдена${NC}"
+        return
+    fi
+    
+    echo -e "${BLUE}IP сервера:${NC}      $SERVER_IP"
+    echo -e "${BLUE}VLESS UUID:${NC}      $VLESS_UUID"
+    echo -e "${BLUE}VLESS порт:${NC}      $VLESS_PORT"
+    echo -e "${BLUE}Public Key:${NC}      $PUBLIC_KEY"
+    echo -e "${BLUE}Private Key:${NC}     $PRIVATE_KEY"
+    echo -e "${BLUE}SOCKS логин:${NC}     $SOCKS_USER"
+    echo -e "${BLUE}SOCKS пароль:${NC}    $SOCKS_PASS"
+    echo -e "${BLUE}SOCKS порт:${NC}      $SOCKS_PORT"
+    echo -e "${BLUE}MTProto порт:${NC}    $MT_PORT"
+    echo -e "${BLUE}MTProto secret:${NC}  $MT_SECRET$MT_TAG"
+    echo ""
+    echo -e "${YELLOW}HTML-файл:${NC} $HTML_FILE"
+}
+
+# --- ПУНКТ 6: Удаление ---
+do_uninstall() {
+    echo -e "\n${RED}╔════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║         ПОЛНОЕ УДАЛЕНИЕ                ║${NC}"
+    echo -e "${RED}╚════════════════════════════════════════╝${NC}\n"
+    
+    read -rp "${RED}Удалить ВСЕ компоненты (Xray, MTProto, конфиги, HTML)? (y/N): ${NC}" ans
+    [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
+    
+    echo -e "${YELLOW}→ Остановка сервисов...${NC}"
+    systemctl stop xray 2>/dev/null
+    systemctl stop mtproto-proxy 2>/dev/null
+    systemctl disable xray 2>/dev/null
+    systemctl disable mtproto-proxy 2>/dev/null
+    
+    echo -e "${YELLOW}→ Удаление файлов...${NC}"
+    rm -rf /usr/local/etc/xray
+    rm -rf "$MT_DIR"
+    rm -rf "$MT_CONF"
+    rm -f /etc/systemd/system/mtproto-proxy.service
+    rm -f "$HTML_FILE"
+    rm -f "$CONFIG_FILE"
+    systemctl daemon-reload
+    
+    echo -e "${GREEN}✅ Всё удалено${NC}"
+}
+
+# --- Главное меню ---
+menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║        EN Server Manager (Xray + MTProto)            ║${NC}"
+        echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        check_installed
+        echo -e "${YELLOW}Выберите действие:${NC}"
+        echo "  1) 🚀 Полная установка (с нуля / с сохранёнными данными)"
+        echo "  2) 🔄 Перезапустить сервисы"
+        echo "  3) 🔑 Перегенерировать ключи и обновить конфиг"
+        echo "  4) 📊 Показать статус сервисов"
+        echo "  5) 📋 Показать текущие настройки"
+        echo "  6) 🗑️  Полное удаление"
+        echo "  0) 🚪 Выход"
+        echo ""
+        read -rp "Введите номер: " choice
+        
+        case $choice in
+            1) do_full_install ;;
+            2) do_restart ;;
+            3) do_regen_keys ;;
+            4) do_status ;;
+            5) do_show_config ;;
+            6) do_uninstall ;;
+            0) echo "Выход..."; exit 0 ;;
+            *) echo -e "${RED}Неверный выбор${NC}" ;;
+        esac
+        
+        echo ""
+        read -rp "Нажмите Enter для возврата в меню..."
+    done
+}
+
+menu
