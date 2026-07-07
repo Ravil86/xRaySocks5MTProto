@@ -143,11 +143,29 @@ check_dns() {
 setup_nginx() {
     echo -e "\n${YELLOW}→ Настройка Nginx (stream proxy с SNI routing)...${NC}"
     
+    # Устанавливаем модуль stream (обязательно!)
+    echo -e "  Установка модуля libnginx-mod-stream..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y libnginx-mod-stream >/dev/null 2>&1
+    
+    # Проверяем, что модуль установлен
+    if [ ! -f "/etc/nginx/modules-enabled/50-mod-stream.conf" ] && \
+       [ ! -f "/usr/share/nginx/modules-available/mod-stream.conf" ]; then
+        echo -e "${RED}✗ Модуль stream не установлен!${NC}"
+        echo -e "${YELLOW}Попробуйте вручную: apt-get install libnginx-mod-stream${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ Модуль stream установлен${NC}"
+    
     # Создаём директорию для конфигов stream
     mkdir -p /etc/nginx/stream-conf.d
     
-    # Основной конфиг Nginx с stream модулем
-    cat > /etc/nginx/nginx.conf <<'NGINX'
+    # Основной конфиг Nginx с явной загрузкой модуля stream
+    cat > /etc/nginx/nginx.conf <<NGINX
+# Загрузка модуля stream (должна быть в самом верху!)
+load_module modules/ngx_stream_module.so;
+
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -159,14 +177,14 @@ events {
 
 stream {
     # Map для SNI routing
-    map $ssl_preread_server_name $backend {
-        PROXY_DOMAIN_PLACEHOLDER mtproto_backend;
+    map \$ssl_preread_server_name \$backend {
+        ${PROXY_DOMAIN} mtproto_backend;
         default website_backend;
     }
     
     # MTProto backend (EN сервер)
     upstream mtproto_backend {
-        server EN_SERVER_IP:EN_MT_PORT;
+        server ${EN_SERVER_IP}:${EN_MT_PORT};
     }
     
     # Website backend (локальный сайт или fallback)
@@ -178,7 +196,7 @@ stream {
     server {
         listen 443;
         listen [::]:443;
-        proxy_pass $backend;
+        proxy_pass \$backend;
         ssl_preread on;
     }
     
@@ -214,7 +232,7 @@ http {
         }
         
         location / {
-            return 301 https://$host$request_uri;
+            return 301 https://\$host\$request_uri;
         }
     }
     
@@ -222,19 +240,26 @@ http {
 }
 NGINX
     
-    # Заменяем плейсхолдеры
-    sed -i "s|PROXY_DOMAIN_PLACEHOLDER|$PROXY_DOMAIN|g" /etc/nginx/nginx.conf
-    sed -i "s|EN_SERVER_IP|$EN_SERVER_IP|g" /etc/nginx/nginx.conf
-    sed -i "s|EN_MT_PORT|$EN_MT_PORT|g" /etc/nginx/nginx.conf
-    
     # Проверяем конфиг
-    nginx -t 2>&1 || { echo -e "${RED}✗ Ошибка в конфиге Nginx${NC}"; return 1; }
+    echo -e "  Проверка конфигурации Nginx..."
+    if ! nginx -t 2>&1; then
+        echo -e "${RED}✗ Ошибка в конфиге Nginx${NC}"
+        nginx -t 2>&1
+        return 1
+    fi
+    echo -e "${GREEN}✓ Конфиг Nginx валиден${NC}"
     
     systemctl enable nginx >/dev/null 2>&1
     systemctl restart nginx
     sleep 1
     
-    systemctl is-active --quiet nginx && echo -e "${GREEN}✓ Nginx запущен (stream proxy → $EN_SERVER_IP:$EN_MT_PORT)${NC}" || { echo -e "${RED}✗ Nginx не запустился${NC}"; return 1; }
+    if systemctl is-active --quiet nginx; then
+        echo -e "${GREEN}✓ Nginx запущен (stream proxy → $EN_SERVER_IP:$EN_MT_PORT)${NC}"
+    else
+        echo -e "${RED}✗ Nginx не запустился${NC}"
+        journalctl -u nginx -n 20 --no-pager
+        return 1
+    fi
     return 0
 }
 
