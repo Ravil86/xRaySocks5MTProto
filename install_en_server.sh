@@ -53,7 +53,6 @@ VLESS_UUID="${VLESS_UUID}"
 SOCKS_USER="${SOCKS_USER}"
 SOCKS_PASS="${SOCKS_PASS}"
 MT_SECRET="${MT_SECRET}"
-MT_TAG="${MT_TAG}"
 VLESS_PORT="${VLESS_PORT}"
 SOCKS_PORT="${SOCKS_PORT}"
 MT_PORT="${MT_PORT}"
@@ -74,7 +73,6 @@ generate_params() {
     SOCKS_USER=$(openssl rand -hex 4)
     SOCKS_PASS=$(openssl rand -hex 8)
     MT_SECRET="dd$(openssl rand -hex 16)"
-    MT_TAG="ee$(openssl rand -hex 8)"
     VLESS_PORT=443
     SOCKS_PORT=10808
     MT_PORT=8888
@@ -280,7 +278,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${MT_CONF}
-ExecStart=${MT_DIR}/objs/bin/mtproto-proxy -u nobody -p 8888 -H ${MT_PORT} -S ${MT_SECRET} -P ${MT_TAG} --aes-pwd proxy-secret proxy-multi.conf
+ExecStart=${MT_DIR}/objs/bin/mtproto-proxy -u nobody -p 8888 -H ${MT_PORT} -S ${MT_SECRET} --aes-pwd proxy-secret proxy-multi.conf
 Restart=on-failure
 [Install]
 WantedBy=multi-user.target
@@ -331,7 +329,7 @@ generate_html() {
     echo -e "${YELLOW}→ Генерация HTML-файла...${NC}"
     VLESS_LINK="vless://${VLESS_UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=&type=tcp&flow=xtls-rprx-vision#EN_VLESS"
     SOCKS_LINK="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${SOCKS_PORT}#EN_SOCKS5"
-    MT_LINK="tg://proxy?server=${SERVER_IP}&port=${MT_PORT}&secret=${MT_SECRET}${MT_TAG}"
+    MT_LINK="tg://proxy?server=${SERVER_IP}&port=${MT_PORT}&secret=${MT_SECRET}"
 
     cat > "$HTML_FILE" <<HTML
 <!DOCTYPE html>
@@ -387,7 +385,7 @@ h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
 <div class="card">
 <h2>✈️ MTProto FakeTLS</h2>
 <span class="lbl">Secret:</span>
-<div class="row"><div class="box">${MT_SECRET}${MT_TAG}</div><button class="btn" onclick="cp(this,'${MT_SECRET}${MT_TAG}')">📋 Копировать</button></div>
+<div class="row"><div class="box">${MT_SECRET}</div><button class="btn" onclick="cp(this,'${MT_SECRET}')">📋 Копировать</button></div>
 <span class="lbl">Порт:</span>
 <div class="row"><div class="box">${MT_PORT}</div><button class="btn" onclick="cp(this,'${MT_PORT}')">📋 Копировать</button></div>
 <span class="lbl">IP сервера:</span>
@@ -434,7 +432,7 @@ do_full_install() {
         echo -e "  Public Key:  ${PUBLIC_KEY:0:30}..."
         echo -e "  SOCKS user:  $SOCKS_USER"
         echo -e "  SOCKS pass:  $SOCKS_PASS"
-        echo -e "  MT secret:   ${MT_SECRET:0:20}..."
+        echo -e "  MT secret:   $MT_SECRET"
         echo -e "  Порты:       VLESS=$VLESS_PORT, SOCKS=$SOCKS_PORT, MT=$MT_PORT"
         echo ""
         echo -e "${YELLOW}Что сделать?${NC}"
@@ -618,7 +616,7 @@ do_show_config() {
     echo -e "${BLUE}SOCKS пароль:${NC}    $SOCKS_PASS"
     echo -e "${BLUE}SOCKS порт:${NC}      $SOCKS_PORT"
     echo -e "${BLUE}MTProto порт:${NC}    $MT_PORT"
-    echo -e "${BLUE}MTProto secret:${NC}  $MT_SECRET$MT_TAG"
+    echo -e "${BLUE}MTProto secret:${NC}  $MT_SECRET"
     echo ""
     echo -e "${YELLOW}HTML-файл:${NC} $HTML_FILE"
 }
