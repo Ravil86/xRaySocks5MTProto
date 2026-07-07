@@ -378,8 +378,8 @@ h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
 <div class="row"><div class="box">${SOCKS_USER}</div><button class="btn" onclick="cp(this,'${SOCKS_USER}')">📋 Копировать</button></div>
 <span class="lbl">Пароль:</span>
 <div class="row"><div class="box">${SOCKS_PASS}</div><button class="btn" onclick="cp(this,'${SOCKS_PASS}')">📋 Копировать</button></div>
-<span class="lbl">Порт:</span>
-<div class="row"><div class="box">${SOCKS_PORT}</div><button class="btn" onclick="cp(this,'${SOCKS_PORT}')">📋 Копировать</button></div>
+<span class="lbl">IP сервера, Порт:</span>
+<div class="row"><div class="box">${SERVER_IP}:${SOCKS_PORT}</div><button class="btn" onclick="cp(this,'${SERVER_IP}:${SOCKS_PORT}')">📋 Копировать</button></div>
 <span class="lbl">Ссылка для импорта:</span>
 <div class="row"><div class="box">${SOCKS_LINK}</div><button class="btn" onclick="cp(this,'${SOCKS_LINK}')">📋 Копировать</button></div>
 </div>
