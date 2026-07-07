@@ -199,35 +199,132 @@ check_dns() {
 setup_nginx() {
     [ "$WORK_MODE" != "domain" ] && return 0
     
-    echo -e "\n${YELLOW}→ Настройка Nginx (HTTPS сайт на 443)...${NC}"
+    echo -e "\n${YELLOW}→ Настройка Nginx (stream routing: HTTPS + MTProto на порту 443)...${NC}"
     
-    cat > /etc/nginx/sites-available/default <<NGINX
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name ${PROXY_DOMAIN};
+    # Устанавливаем модуль stream
+    apt-get install -y libnginx-mod-stream nginx certbot python3-certbot-nginx >/dev/null 2>&1
     
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
+    # Основной конфиг с stream модулем
+    cat > /etc/nginx/nginx.conf <<'NGINX'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 1024;
+}
+
+stream {
+    # Различаем трафик по первым байтам
+    # TLS ClientHello начинается с 0x16 0x03 (22 3 в decimal)
+    # MTProto начинается с других байт
+    map $ssl_preread_protocol $upstream {
+        default     mtproto_backend;
+        "TLSv1.3"   website_backend;
+        "TLSv1.2"   website_backend;
+        "TLSv1.1"   website_backend;
+        "TLSv1.0"   website_backend;
     }
     
-    location / {
-        return 301 https://\$host\$request_uri;
+    # MTProto → EN сервер
+    upstream mtproto_backend {
+        server EN_SERVER_IP:EN_MT_PORT;
+    }
+    
+    # HTTPS сайт → локально
+    upstream website_backend {
+        server 127.0.0.1:8443;
+    }
+    
+    # Главный listener на 443
+    server {
+        listen 443;
+        listen [::]:443;
+        proxy_pass $upstream;
+        ssl_preread on;
+    }
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+    
+    # HTTPS сайт на внутреннем порту 8443
+    server {
+        listen 127.0.0.1:8443 ssl http2;
+        server_name PROXY_DOMAIN_PLACEHOLDER;
+        
+        ssl_certificate /etc/letsencrypt/live/PROXY_DOMAIN_PLACEHOLDER/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/PROXY_DOMAIN_PLACEHOLDER/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        
+        root /var/www/html;
+        index index.html;
+        
+        location / {
+            try_files $uri $uri/ =404;
+        }
+    }
+    
+    # HTTP на 80 для Certbot и редиректа
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name _;
+        
+        location /.well-known/acme-challenge/ {
+            root /var/www/html;
+        }
+        
+        location / {
+            return 301 https://$host$request_uri;
+        }
     }
 }
 NGINX
     
+    # Подставляем реальные значения
+    sed -i "s|EN_SERVER_IP|${EN_SERVER_IP}|g" /etc/nginx/nginx.conf
+    sed -i "s|EN_MT_PORT|${EN_MT_PORT}|g" /etc/nginx/nginx.conf
+    sed -i "s|PROXY_DOMAIN_PLACEHOLDER|${PROXY_DOMAIN}|g" /etc/nginx/nginx.conf
+    
+    # Создаём сайт
     mkdir -p /var/www/html
     cat > /var/www/html/index.html <<HTML
 <!DOCTYPE html>
-<html><head><title>Welcome</title></head>
-<body><h1>Welcome to ${PROXY_DOMAIN}</h1></body></html>
+<html>
+<head><title>Welcome</title></head>
+<body>
+<h1>Welcome to ${PROXY_DOMAIN}</h1>
+<p>This site works. MTProto is also available on port 443.</p>
+</body>
+</html>
 HTML
     
-    nginx -t 2>&1 || { echo -e "${RED}✗ Ошибка конфига Nginx${NC}"; return 1; }
+    echo -e "  Проверка конфига..."
+    if ! nginx -t 2>&1; then
+        echo -e "${RED}✗ Ошибка конфига Nginx${NC}"
+        nginx -t 2>&1
+        return 1
+    fi
+    
     systemctl enable nginx >/dev/null 2>&1
     systemctl restart nginx
-    echo -e "${GREEN}✓ Nginx настроен (HTTP на 80, SSL получим ниже)${NC}"
+    sleep 1
+    
+    if systemctl is-active --quiet nginx; then
+        echo -e "${GREEN}✓ Nginx настроен (stream routing на 443)${NC}"
+        echo -e "  HTTPS сайт: https://${PROXY_DOMAIN}"
+        echo -e "  MTProto:    ${PROXY_DOMAIN}:443"
+    else
+        echo -e "${RED}✗ Nginx не запустился${NC}"
+        journalctl -u nginx -n 15 --no-pager
+        return 1
+    fi
     return 0
 }
 
@@ -237,8 +334,13 @@ setup_ssl() {
     
     echo -e "\n${YELLOW}→ Получение SSL сертификата для $PROXY_DOMAIN...${NC}"
     
+    # Временно останавливаем Nginx для standalone certbot
     systemctl stop nginx
-    certbot certonly --standalone -d $PROXY_DOMAIN --non-interactive --agree-tos --email admin@${PROXY_DOMAIN} 2>&1 | tail -5
+    
+    # Получаем сертификат
+    certbot certonly --standalone -d $PROXY_DOMAIN \
+        --non-interactive --agree-tos \
+        --email admin@${PROXY_DOMAIN} 2>&1 | tail -5
     
     if [ ! -d "/etc/letsencrypt/live/$PROXY_DOMAIN" ]; then
         echo -e "${RED}✗ Не удалось получить сертификат${NC}"
@@ -246,54 +348,29 @@ setup_ssl() {
         return 1
     fi
     
-    # Обновляем конфиг Nginx с SSL
-    cat > /etc/nginx/sites-available/default <<NGINX
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${PROXY_DOMAIN};
+    echo -e "${GREEN}✓ SSL сертификат получен${NC}"
     
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${PROXY_DOMAIN};
-    
-    ssl_certificate /etc/letsencrypt/live/${PROXY_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${PROXY_DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    
-    root /var/www/html;
-    index index.html;
-    
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-}
-NGINX
-    
-    nginx -t 2>&1 || { echo -e "${RED}✗ Ошибка конфига Nginx с SSL${NC}"; return 1; }
+    # Запускаем Nginx обратно
     systemctl start nginx
-    systemctl reload nginx
+    sleep 1
     
-    echo "0 3 * * * certbot renew --quiet && systemctl reload nginx" | crontab -
-    echo -e "${GREEN}✓ SSL сертификат получен и настроено автообновление${NC}"
+    # Проверяем работу
+    if systemctl is-active --quiet nginx; then
+        echo -e "${GREEN}✓ Nginx запущен с SSL${NC}"
+    else
+        echo -e "${RED}✗ Nginx не запустился${NC}"
+        return 1
+    fi
+    
+    # Автообновление
+    echo "0 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload nginx'" | crontab -
+    echo -e "${GREEN}✓ Автообновление сертификата настроено${NC}"
     return 0
 }
 
 # --- Настройка iptables ---
 setup_iptables() {
-    echo -e "\n${YELLOW}→ Настройка iptables (DNAT)...${NC}"
-    echo -e "  MTProto: $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT"
+    echo -e "\n${YELLOW}→ Настройка iptables...${NC}"
     
     grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf || { echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf; sysctl -p >/dev/null 2>&1; }
     
@@ -304,33 +381,44 @@ setup_iptables() {
     iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i lo -j ACCEPT
     iptables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
     
-    for port in $RU_VLESS_PORT $RU_SOCKS_PORT $RU_MT_PORT; do
+    # VLESS и SOCKS
+    for port in $RU_VLESS_PORT $RU_SOCKS_PORT; do
         iptables -C INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport $port -j ACCEPT
     done
     iptables -C INPUT -p udp --dport $RU_SOCKS_PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport $RU_SOCKS_PORT -j ACCEPT
+    
+    # HTTP/HTTPS для Nginx
     iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-    [ "$WORK_MODE" = "domain" ] && { iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 443 -j ACCEPT; }
+    iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport 443 -j ACCEPT
     
-    iptables -t nat -F 2>/dev/null
+    # MTProto через iptables ТОЛЬКО если не Nginx
+    if [ "$WORK_MODE" != "domain" ]; then
+        iptables -C INPUT -p tcp --dport $RU_MT_PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport $RU_MT_PORT -j ACCEPT
+        iptables -t nat -F 2>/dev/null
+        iptables -t nat -A PREROUTING -p tcp --dport $RU_MT_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_MT_PORT}
+        iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_MT_PORT} -j MASQUERADE
+    else
+        # В режиме domain MTProto идёт через Nginx stream, DNAT не нужен
+        iptables -t nat -F 2>/dev/null
+    fi
     
-    # VLESS
+    # VLESS и SOCKS DNAT (всегда)
     iptables -t nat -A PREROUTING -p tcp --dport $RU_VLESS_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_VLESS_PORT}
     iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_VLESS_PORT} -j MASQUERADE
-    
-    # SOCKS5
     iptables -t nat -A PREROUTING -p tcp --dport $RU_SOCKS_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_SOCKS_PORT}
     iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_SOCKS_PORT} -j MASQUERADE
     iptables -t nat -A PREROUTING -p udp --dport $RU_SOCKS_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_SOCKS_PORT}
     iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p udp --dport ${EN_SOCKS_PORT} -j MASQUERADE
     
-    # MTProto
-    iptables -t nat -A PREROUTING -p tcp --dport $RU_MT_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_MT_PORT}
-    iptables -t nat -A POSTROUTING -d ${EN_SERVER_IP} -p tcp --dport ${EN_MT_PORT} -j MASQUERADE
-    
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4 2>/dev/null
-    dpkg -l | grep -q iptables-persistent || { echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections; apt-get install -y iptables-persistent >/dev/null 2>&1; }
-    echo -e "${GREEN}✓ iptables настроен (MT: $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT)${NC}"
+    
+    echo -e "${GREEN}✓ iptables настроен${NC}"
+    if [ "$WORK_MODE" = "domain" ]; then
+        echo -e "  Режим domain: 443 порт обслуживается Nginx stream"
+    else
+        echo -e "  MT: $RU_MT_PORT → $EN_SERVER_IP:$EN_MT_PORT"
+    fi
 }
 
 # --- Настройка socat ---
@@ -371,12 +459,14 @@ generate_html() {
     read -rp "MTProto secret EN сервера: " MT_SECRET
     [ -z "$MT_SECRET" ] && MT_SECRET="ВСТАВЬТЕ_SECRET_ИЗ_EN_СЕРВЕРА"
     
-    if [ "$WORK_MODE" = "domain" ]; then
+   # в режиме domain теперь ВСЕГДА порт 443
+   if [ "$WORK_MODE" = "domain" ]; then
         MT_SERVER="$PROXY_DOMAIN"
+        MT_PORT_DISPLAY="443"   # ← было $RU_MT_PORT
     else
         MT_SERVER="$RU_IPV4"
+        MT_PORT_DISPLAY="$RU_MT_PORT"
     fi
-    MT_PORT_DISPLAY="$RU_MT_PORT"
     
     MT_LINK="tg://proxy?server=${MT_SERVER}&port=${MT_PORT_DISPLAY}&secret=${MT_SECRET}"
     
