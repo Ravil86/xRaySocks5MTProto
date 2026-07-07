@@ -463,8 +463,10 @@ do_full_install() {
         [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
     fi
     
-    disable_ufw; install_deps; ask_tls_domain
-    ask_mtproto_mode          # ← ДОБАВЛЕНО
+    disable_ufw; install_deps; 
+    ask_mtproto_mode;
+    ask_tls_domain;
+
     setup_xray || return; generate_params || return; configure_xray || return
     setup_mtg || return; configure_mtg; setup_fw; save_config; generate_html
     
