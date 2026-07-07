@@ -31,3 +31,17 @@ chmod +x install_ru_relay.sh && ./install_ru_relay.sh
 → введите IP EN, выберите 1
 
 4. В клиентах подключайтесь к IP RU сервера, используя параметры из EN HTML-файла.
+
+
+
+# На EN сервере
+chmod +x install_en_server.sh
+./install_en_server.sh
+# → выбрать 1 (полная установка)
+# → скопировать IP из /root/proxy_settings.html
+
+# На RU сервере
+chmod +x install_ru_relay.sh
+./install_ru_relay.sh
+# → выбрать 1 (полная настройка)
+# → ввести IP EN сервера и порты
