@@ -7,24 +7,16 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 CONFIG_FILE="/root/.relay_config"
 HTML_FILE="/root/relay_info.html"
 
-echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║   НАСТРОЙКА RU RELAY СЕРВЕРА           ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
-
-# --- Отключение UFW ---
 disable_ufw() {
-    echo -e "\n${YELLOW}→ Отключение UFW...${NC}"
     if command -v ufw &>/dev/null; then
+        echo -e "${YELLOW}→ Отключение UFW...${NC}"
         ufw disable 2>/dev/null || true
         systemctl stop ufw 2>/dev/null || true
         systemctl disable ufw 2>/dev/null || true
         echo -e "${GREEN}✓ UFW отключён${NC}"
-    else
-        echo -e "${GREEN}✓ UFW не установлен${NC}"
     fi
 }
 
-# --- Запрос параметров EN сервера ---
 ask_en_params() {
     echo -e "\n${BLUE}═══ Параметры EN сервера ═══${NC}"
     if [ -f "$CONFIG_FILE" ]; then
@@ -52,7 +44,6 @@ ask_en_params() {
     RU_MT_PORT=8888
 }
 
-# --- Выбор метода relay ---
 ask_relay_method() {
     echo -e "\n${BLUE}═══ Метод relay ═══${NC}"
     echo "  1) iptables (прозрачный, быстрее)"
@@ -67,7 +58,6 @@ ask_relay_method() {
     echo -e "${GREEN}✓ Выбран метод: $RELAY_METHOD${NC}"
 }
 
-# --- Установка зависимостей ---
 install_deps() {
     echo -e "\n${YELLOW}→ Установка зависимостей...${NC}"
     export DEBIAN_FRONTEND=noninteractive
@@ -76,7 +66,6 @@ install_deps() {
     echo -e "${GREEN}✓ Зависимости установлены${NC}"
 }
 
-# --- Настройка iptables ---
 setup_iptables() {
     echo -e "\n${YELLOW}→ Настройка iptables (DNAT)...${NC}"
     
@@ -88,7 +77,6 @@ setup_iptables() {
     SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     SSH_PORT=${SSH_PORT:-22}
     
-    # ВАЖНО: SSH ПЕРВЫМ
     iptables -C INPUT -p tcp --dport $SSH_PORT -j ACCEPT 2>/dev/null || \
         iptables -I INPUT 1 -p tcp --dport $SSH_PORT -j ACCEPT
     iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || \
@@ -96,7 +84,6 @@ setup_iptables() {
     iptables -C INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
         iptables -I INPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
     
-    # Relay порты
     for port in $RU_VLESS_PORT $RU_SOCKS_PORT $RU_MT_PORT; do
         iptables -C INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || \
             iptables -A INPUT -p tcp --dport $port -j ACCEPT
@@ -104,7 +91,6 @@ setup_iptables() {
     iptables -C INPUT -p udp --dport $RU_SOCKS_PORT -j ACCEPT 2>/dev/null || \
         iptables -A INPUT -p udp --dport $RU_SOCKS_PORT -j ACCEPT
     
-    # NAT таблица
     iptables -t nat -F 2>/dev/null
     
     iptables -t nat -A PREROUTING -p tcp --dport $RU_VLESS_PORT -j DNAT --to-destination ${EN_SERVER_IP}:${EN_VLESS_PORT}
@@ -129,7 +115,6 @@ setup_iptables() {
     echo -e "${GREEN}✓ iptables настроен (SSH:${SSH_PORT} + relay порты)${NC}"
 }
 
-# --- Настройка socat ---
 setup_socat() {
     echo -e "\n${YELLOW}→ Создание systemd сервисов socat...${NC}"
     
@@ -165,11 +150,21 @@ SV
     echo -e "${GREEN}✓ socat настроен (запущено $ok/3 сервисов)${NC}"
 }
 
-# --- Генерация HTML ---
+# --- Генерация HTML с кнопкой "Добавить в Telegram" ---
 generate_html() {
     echo -e "\n${YELLOW}→ Генерация HTML-файла...${NC}"
     RU_IP=$(curl -s --max-time 5 ifconfig.me || curl -s --max-time 5 ipinfo.io/ip)
     [ -z "$RU_IP" ] && RU_IP="unknown"
+    
+    # Спрашиваем параметры MTProto для кнопки в Telegram
+    echo -e "\n${BLUE}═══ Параметры MTProto для Telegram ═══${NC}"
+    echo "  Эти данные нужны для кнопки 'Добавить в Telegram'."
+    echo "  Возьмите их из HTML-файла EN сервера."
+    echo ""
+    read -rp "MTProto secret EN сервера: " MT_SECRET
+    [ -z "$MT_SECRET" ] && MT_SECRET="ВСТАВЬТЕ_SECRET_ИЗ_EN_СЕРВЕРА"
+    
+    MT_LINK="tg://proxy?server=${RU_IP}&port=${RU_MT_PORT}&secret=${MT_SECRET}"
     
     cat > "$HTML_FILE" <<HTML
 <!DOCTYPE html>
@@ -186,20 +181,34 @@ h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
 table{width:100%;border-collapse:collapse;margin:15px 0}
 th,td{padding:10px;text-align:left;border-bottom:1px solid #e2e8f0}
 th{background:#3182ce;color:#fff}
-.row{display:flex;align-items:center;gap:8px;margin:8px 0}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
 .box{background:#edf2f7;padding:12px;border-radius:6px;word-break:break-all;font-family:monospace;font-size:14px;flex:1;min-width:0}
 .lbl{font-weight:600;color:#2d3748;display:block;margin-top:12px}
-.btn{background:#3182ce;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.btn{background:#3182ce;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;flex-shrink:0;text-decoration:none;font-size:14px;display:inline-block}
 .btn:hover{background:#2c5282}
 .btn.ok{background:#38a169}
+.btn.tg{background:#0088cc;font-size:16px;padding:12px 24px}
+.btn.tg:hover{background:#006699}
 .warn{background:#fffbeb;border-left:4px solid #d69e2e;padding:15px;margin:20px 0}
 .ok-box{background:#d4edda;border-left:4px solid #28a745;padding:15px;margin:20px 0}
 code{background:#edf2f7;padding:2px 6px;border-radius:3px;font-size:13px}
+.tg-section{background:#e3f2fd;border:2px solid #0088cc;border-radius:10px;padding:20px;margin:20px 0;text-align:center}
+.tg-section h2{color:#0088cc;border:none}
 </style>
 </head>
 <body>
 <h1>🇷🇺 RU Relay Server</h1>
 <div class="ok-box"><strong>RU IP:</strong> ${RU_IP}<br><strong>EN IP:</strong> ${EN_SERVER_IP}<br><strong>Метод:</strong> ${RELAY_METHOD}<br><strong>Настроено:</strong> $(date '+%Y-%m-%d %H:%M:%S')</div>
+
+<div class="tg-section">
+<h2>✈️ MTProto Proxy через RU сервер</h2>
+<p style="font-size:16px;margin:15px 0">Нажмите кнопку ниже, чтобы добавить прокси в Telegram:</p>
+<a href="${MT_LINK}" class="btn tg">➕ Добавить в Telegram</a>
+<p style="margin-top:15px;font-size:13px;color:#666">
+Или откройте ссылку вручную:<br>
+<code>${MT_LINK}</code>
+</p>
+</div>
 
 <div class="card">
 <h2>⚙️ Маршрутизация</h2>
@@ -227,6 +236,12 @@ code{background:#edf2f7;padding:2px 6px;border-radius:3px;font-size:13px}
 
 <span class="lbl">MTProto порт (RU → EN):</span>
 <div class="row"><div class="box">${RU_MT_PORT} → ${EN_SERVER_IP}:${EN_MT_PORT}</div><button class="btn" onclick="cp(this,'${RU_MT_PORT}')">📋 Копировать порт</button></div>
+
+<span class="lbl">MTProto secret:</span>
+<div class="row"><div class="box">${MT_SECRET}</div><button class="btn" onclick="cp(this,'${MT_SECRET}')">📋 Копировать</button></div>
+
+<span class="lbl">Ссылка для Telegram:</span>
+<div class="row"><div class="box">${MT_LINK}</div><button class="btn" onclick="cp(this,'${MT_LINK}')">📋 Копировать</button></div>
 </div>
 
 <div class="warn">
@@ -270,9 +285,9 @@ function cp(b,t){
 </body></html>
 HTML
     echo -e "${GREEN}✓ HTML сгенерирован: $HTML_FILE${NC}"
+    echo -e "${YELLOW}  Откройте его на телефоне и нажмите 'Добавить в Telegram'${NC}"
 }
 
-# --- Сохранение конфига ---
 save_config() {
     cat > "$CONFIG_FILE" <<CONF
 EN_SERVER_IP="${EN_SERVER_IP}"
@@ -288,7 +303,6 @@ CONF
     echo -e "${GREEN}✓ Конфигурация сохранена в $CONFIG_FILE${NC}"
 }
 
-# --- Главное меню ---
 menu() {
     while true; do
         clear
@@ -318,9 +332,8 @@ menu() {
         
         case $choice in
             1)
-                echo -e "\n${GREEN}═══ ПОЛНАЯ НАСТРОЙКА RU RELAY ═══${NC}"
                 disable_ufw
-                ask_en_params || { read -rp "Enter для меню..."; continue; }
+                ask_en_params || { read -rp "Enter..."; continue; }
                 ask_relay_method
                 install_deps
                 case $RELAY_METHOD in
@@ -334,27 +347,23 @@ menu() {
                 echo -e "HTML-файл: ${YELLOW}$HTML_FILE${NC}"
                 ;;
             2)
-                echo -e "\n${GREEN}═══ ПЕРЕЗАПУСК RELAY ═══${NC}"
                 if [ ! -f "$CONFIG_FILE" ]; then
                     echo -e "${RED}✗ Конфиг не найден${NC}"
                 else
                     source "$CONFIG_FILE"
                     if [ "$RELAY_METHOD" = "socat" ] || [ "$RELAY_METHOD" = "both" ]; then
-                        systemctl restart relay-vless relay-socks relay-mtproto 2>&1
+                        systemctl restart relay-vless relay-socks relay-mtproto
                         sleep 1
                         for s in relay-vless relay-socks relay-mtproto; do
-                            systemctl is-active --quiet $s && echo -e "${GREEN}  ✓ $s запущен${NC}" || echo -e "${RED}  ✗ $s не запущен${NC}"
+                            systemctl is-active --quiet $s && echo -e "${GREEN}✓ $s${NC}" || echo -e "${RED}✗ $s${NC}"
                         done
                     fi
-                    if [ "$RELAY_METHOD" = "iptables" ] || [ "$RELAY_METHOD" = "both" ]; then
-                        setup_iptables
-                    fi
+                    [ "$RELAY_METHOD" = "iptables" ] || [ "$RELAY_METHOD" = "both" ] && setup_iptables
                     echo -e "${GREEN}✅ Перезапуск завершён${NC}"
                 fi
                 ;;
             3)
-                echo -e "\n${GREEN}═══ ИЗМЕНИТЬ EN СЕРВЕР/ПОРТЫ ═══${NC}"
-                ask_en_params || { read -rp "Enter для меню..."; continue; }
+                ask_en_params || { read -rp "Enter..."; continue; }
                 ask_relay_method
                 case $RELAY_METHOD in
                     iptables) setup_iptables ;;
@@ -366,7 +375,6 @@ menu() {
                 echo -e "${GREEN}✅ Конфигурация обновлена${NC}"
                 ;;
             4)
-                echo -e "\n${GREEN}═══ СТАТУС RELAY ═══${NC}"
                 if [ -f "$CONFIG_FILE" ]; then
                     source "$CONFIG_FILE"
                     echo -e "${BLUE}EN сервер:${NC} $EN_SERVER_IP"
@@ -376,13 +384,10 @@ menu() {
                 iptables -t nat -L -n -v 2>&1 | grep -E "(Chain|DNAT|MASQUERADE)" || echo "Правил нет"
                 echo -e "\n${BLUE}═══ socat сервисы ═══${NC}"
                 for s in relay-vless relay-socks relay-mtproto; do
-                    systemctl is-active --quiet $s 2>/dev/null && echo -e "${GREEN}  ✓ $s: запущен${NC}" || echo -e "${RED}  ✗ $s: не активен${NC}"
+                    systemctl is-active --quiet $s 2>/dev/null && echo -e "${GREEN}  ✓ $s${NC}" || echo -e "${RED}  ✗ $s${NC}"
                 done
-                echo -e "\n${BLUE}═══ Слушающие порты ═══${NC}"
-                ss -tlnp | grep -E ":(443|10808|8888)" || echo "Ничего не слушает"
                 ;;
             5)
-                echo -e "\n${GREEN}═══ ТЕКУЩИЕ НАСТРОЙКИ ═══${NC}"
                 if [ -f "$CONFIG_FILE" ]; then
                     source "$CONFIG_FILE"
                     echo -e "${BLUE}EN сервер:${NC}     $EN_SERVER_IP"
@@ -396,21 +401,16 @@ menu() {
                 fi
                 ;;
             6)
-                echo -e "\n${RED}═══ УДАЛЕНИЕ RELAY ═══${NC}"
-                read -rp "${RED}Удалить все relay-компоненты? (y/N): ${NC}" ans
+                read -rp "${RED}Удалить relay? (y/N): ${NC}" ans
                 if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
                     systemctl stop relay-vless relay-socks relay-mtproto 2>/dev/null
                     systemctl disable relay-vless relay-socks relay-mtproto 2>/dev/null
-                    rm -f /etc/systemd/system/relay-*.service
-                    rm -f "$HTML_FILE"
-                    rm -f "$CONFIG_FILE"
+                    rm -f /etc/systemd/system/relay-*.service "$HTML_FILE" "$CONFIG_FILE"
                     systemctl daemon-reload
                     iptables -t nat -F 2>/dev/null
                     mkdir -p /etc/iptables
                     iptables-save > /etc/iptables/rules.v4 2>/dev/null
-                    echo -e "${GREEN}✅ Relay полностью удалён${NC}"
-                else
-                    echo "Отменено"
+                    echo -e "${GREEN}✅ Relay удалён${NC}"
                 fi
                 ;;
             0) echo "Выход..."; exit 0 ;;

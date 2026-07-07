@@ -6,8 +6,6 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 CONFIG_FILE="/root/.proxy_config"
 HTML_FILE="/root/proxy_settings.html"
-MT_DIR="/opt/MTProxy"
-MT_CONF="/etc/mtproto"
 
 # --- Проверка компонентов ---
 check_installed() {
@@ -17,15 +15,18 @@ check_installed() {
     else
         echo -e "  ${RED}✗ Xray не установлен${NC}"
     fi
-    if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
-        echo -e "  ${GREEN}✓ MTProto: запущен${NC}"
-    elif [ -f "$MT_DIR/objs/bin/mtproto-proxy" ]; then
-        echo -e "  ${YELLOW}⚠ MTProto: установлен, но не запущен${NC}"
+    if command -v mtg &>/dev/null; then
+        echo -e "  ${GREEN}✓ MTG (MTProto): установлен${NC}"
     else
-        echo -e "  ${RED}✗ MTProto: не установлен${NC}"
+        echo -e "  ${RED}✗ MTG не установлен${NC}"
+    fi
+    if systemctl is-active --quiet mtg 2>/dev/null; then
+        echo -e "  ${GREEN}✓ MTProto: запущен${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ MTProto: не запущен${NC}"
     fi
     if [ -f "$CONFIG_FILE" ]; then
-        echo -e "  ${GREEN}✓ Конфигурация сохранена: $CONFIG_FILE${NC}"
+        echo -e "  ${GREEN}✓ Конфигурация сохранена${NC}"
     else
         echo -e "  ${YELLOW}⚠ Конфигурация не найдена${NC}"
     fi
@@ -39,10 +40,7 @@ check_installed() {
 
 # --- Загрузка/сохранение конфига ---
 load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        return 0
-    fi
+    [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE" && return 0
     return 1
 }
 
@@ -53,9 +51,10 @@ VLESS_UUID="${VLESS_UUID}"
 SOCKS_USER="${SOCKS_USER}"
 SOCKS_PASS="${SOCKS_PASS}"
 MT_SECRET="${MT_SECRET}"
+MT_PORT="${MT_PORT}"
+TLS_DOMAIN="${TLS_DOMAIN}"
 VLESS_PORT="${VLESS_PORT}"
 SOCKS_PORT="${SOCKS_PORT}"
-MT_PORT="${MT_PORT}"
 PRIVATE_KEY="${PRIVATE_KEY}"
 PUBLIC_KEY="${PUBLIC_KEY}"
 XRAY_CFG="${XRAY_CFG}"
@@ -72,10 +71,15 @@ generate_params() {
     VLESS_UUID=$(cat /proc/sys/kernel/random/uuid)
     SOCKS_USER=$(openssl rand -hex 4)
     SOCKS_PASS=$(openssl rand -hex 8)
-    MT_SECRET="dd$(openssl rand -hex 16)"
+    
+    # Короткий MTProto secret (32 символа: ee + 30 hex)
+    MT_SECRET="ee$(openssl rand -hex 15)"
+    
+    MT_PORT=8888
+    TLS_DOMAIN="ya.ru"  # Домен для FakeTLS
+    
     VLESS_PORT=443
     SOCKS_PORT=10808
-    MT_PORT=8888
 
     XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
     echo -e "  Генерация x25519 ключей..."
@@ -98,11 +102,36 @@ generate_params() {
     echo -e "${GREEN}✓ Параметры сгенерированы:${NC}"
     echo -e "  IP: $SERVER_IP"
     echo -e "  UUID: $VLESS_UUID"
-    echo -e "  SOCKS логин: $SOCKS_USER"
-    echo -e "  SOCKS пароль: $SOCKS_PASS"
-    echo -e "  Private Key: ${PRIVATE_KEY:0:20}..."
+    echo -e "  SOCKS: $SOCKS_USER / $SOCKS_PASS"
+    echo -e "  MTProto secret: $MT_SECRET (FakeTLS → $TLS_DOMAIN)"
     echo -e "  Public Key: ${PUBLIC_KEY:0:20}..."
     return 0
+}
+
+# --- Запрос TLS домена ---
+ask_tls_domain() {
+    echo -e "\n${BLUE}═══ Домен для FakeTLS ═══${NC}"
+    echo "  Трафик MTProto будет маскироваться под HTTPS к этому домену."
+    echo "  Выберите домен, который НЕ заблокирован у вас:"
+    echo "    1) ya.ru (Яндекс, рекомендуется для РФ)"
+    echo "    2) google.com"
+    echo "    3) microsoft.com"
+    echo "    4) apple.com"
+    echo "    5) github.com"
+    echo "    6) Свой домен"
+    read -rp "Выбор [1]: " choice
+    case $choice in
+        2) TLS_DOMAIN="google.com" ;;
+        3) TLS_DOMAIN="microsoft.com" ;;
+        4) TLS_DOMAIN="apple.com" ;;
+        5) TLS_DOMAIN="github.com" ;;
+        6) 
+            read -rp "Введите домен: " TLS_DOMAIN
+            [ -z "$TLS_DOMAIN" ] && TLS_DOMAIN="ya.ru"
+            ;;
+        *) TLS_DOMAIN="ya.ru" ;;
+    esac
+    echo -e "${GREEN}✓ Выбран домен: $TLS_DOMAIN${NC}"
 }
 
 # --- Отключение UFW ---
@@ -121,7 +150,7 @@ install_deps() {
     echo -e "${YELLOW}→ Установка зависимостей...${NC}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y curl wget jq openssl git build-essential cmake libssl-dev zlib1g-dev iptables >/dev/null 2>&1
+    apt-get install -y curl wget jq openssl git iptables >/dev/null 2>&1
     echo -e "${GREEN}✓ Зависимости установлены${NC}"
 }
 
@@ -131,27 +160,22 @@ setup_xray() {
     bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install 2>&1 | tail -5
 
     XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
-    echo -e "  Xray binary: $XRAY_BIN"
-
     XRAY_CFG=""
-    for path in "/usr/local/etc/xray/config.json" "/etc/xray/config.json" "/usr/local/share/xray/config.json"; do
+    for path in "/usr/local/etc/xray/config.json" "/etc/xray/config.json"; do
         dir=$(dirname "$path")
         if [ -d "$dir" ] || [ -f "$path" ]; then
             XRAY_CFG="$path"
-            echo -e "  Найден путь конфига: $XRAY_CFG"
             break
         fi
     done
 
     if [ -z "$XRAY_CFG" ]; then
-        echo -e "  ${YELLOW}Путь конфига не найден, создаём /usr/local/etc/xray/...${NC}"
         mkdir -p /usr/local/etc/xray
         XRAY_CFG="/usr/local/etc/xray/config.json"
     fi
 
-    XRAY_DIR=$(dirname "$XRAY_CFG")
-    [ ! -d "$XRAY_DIR" ] && mkdir -p "$XRAY_DIR"
-    chmod 755 "$XRAY_DIR"
+    [ ! -d "$(dirname "$XRAY_CFG")" ] && mkdir -p "$(dirname "$XRAY_CFG")"
+    chmod 755 "$(dirname "$XRAY_CFG")"
 
     if command -v xray &>/dev/null; then
         echo -e "${GREEN}✓ Xray установлен: $(xray version 2>/dev/null | head -1)${NC}"
@@ -187,8 +211,8 @@ configure_xray() {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "dest": "www.microsoft.com:443",
-          "serverNames": ["www.microsoft.com", "microsoft.com"],
+          "dest": "${TLS_DOMAIN}:443",
+          "serverNames": ["${TLS_DOMAIN}", "www.${TLS_DOMAIN}"],
           "privateKey": "${PRIVATE_KEY}",
           "shortIds": ["", "0123456789abcdef"]
         }
@@ -214,20 +238,18 @@ configure_xray() {
 XRAY
 
     [ ! -f "$XRAY_CFG" ] && { echo -e "${RED}✗ Файл конфига не создан!${NC}"; return 1; }
-    echo -e "  ✓ Файл создан: $(ls -lh "$XRAY_CFG" | awk '{print $5, $9}')"
 
     XRAY_BIN=$(which xray 2>/dev/null || echo "/usr/local/bin/xray")
     TEST_OUT=$("$XRAY_BIN" run -test -config "$XRAY_CFG" 2>&1)
     if echo "$TEST_OUT" | grep -qi "ok\|valid\|success"; then
-        echo -e "${GREEN}✓ Конфиг валиден${NC}"
+        echo -e "${GREEN}✓ Конфиг Xray валиден${NC}"
     else
-        echo -e "${YELLOW}⚠ Вывод проверки:${NC}"
+        echo -e "${YELLOW}⚠ Предупреждение:${NC}"
         echo "$TEST_OUT" | sed 's/^/    /'
     fi
 
     if [ -f "/etc/systemd/system/xray.service" ]; then
         sed -i "s|/usr/local/etc/xray/config.json|$XRAY_CFG|g" /etc/systemd/system/xray.service 2>/dev/null || true
-        sed -i "s|/etc/xray/config.json|$XRAY_CFG|g" /etc/systemd/system/xray.service 2>/dev/null || true
         systemctl daemon-reload
     fi
 
@@ -245,52 +267,67 @@ XRAY
     return 0
 }
 
-# --- Установка MTProto ---
-setup_mtproto() {
-    echo -e "${YELLOW}→ Компиляция MTProto Proxy...${NC}"
-    if [ ! -d "$MT_DIR" ]; then
-        cd /opt && git clone https://github.com/TelegramMessenger/MTProxy.git >/dev/null 2>&1
-    fi
-    cd "$MT_DIR"
-    make clean >/dev/null 2>&1
-    make -j$(nproc) >/dev/null 2>&1
-    if [ ! -f "$MT_DIR/objs/bin/mtproto-proxy" ]; then
-        echo -e "${RED}✗ Ошибка компиляции MTProto${NC}"
+# --- Установка MTG (MTProto с FakeTLS) ---
+setup_mtg() {
+    echo -e "${YELLOW}→ Установка MTG (MTProto proxy с FakeTLS)...${NC}"
+    
+    # Определяем архитектуру
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) MTG_ARCH="linux-amd64" ;;
+        aarch64|arm64) MTG_ARCH="linux-arm64" ;;
+        armv7l) MTG_ARCH="linux-arm7" ;;
+        *) echo -e "${RED}✗ Неподдерживаемая архитектура: $ARCH${NC}"; return 1 ;;
+    esac
+    
+    # Скачиваем последнюю версию mtg
+    MTG_VERSION=$(curl -s https://api.github.com/repos/9seconds/mtg/releases/latest | grep -oP '"tag_name": "\K[^"]+' | head -1)
+    [ -z "$MTG_VERSION" ] && MTG_VERSION="v2.2.1"
+    
+    echo -e "  Версия: $MTG_VERSION, архитектура: $MTG_ARCH"
+    
+    cd /tmp
+    wget -q "https://github.com/9seconds/mtg/releases/download/${MTG_VERSION}/mtg-${MTG_ARCH}" -O mtg
+    chmod +x mtg
+    mv mtg /usr/local/bin/mtg
+    
+    if ! command -v mtg &>/dev/null; then
+        echo -e "${RED}✗ Ошибка установки mtg${NC}"
         return 1
     fi
-    echo -e "${GREEN}✓ MTProto скомпилирован${NC}"
-
-    mkdir -p "$MT_CONF"
-    cd "$MT_CONF"
-    curl -s https://core.telegram.org/getProxySecret -o proxy-secret
-    curl -s https://core.telegram.org/getProxyConfig -o proxy-multi.conf
-    echo -e "${GREEN}✓ Конфигурация Telegram загружена${NC}"
+    
+    echo -e "${GREEN}✓ MTG установлен: $(mtg --version 2>&1 | head -1)${NC}"
     return 0
 }
 
-# --- Настройка сервиса MTProto ---
-configure_mtproto() {
-    echo -e "${YELLOW}→ Настройка systemd сервиса MTProto...${NC}"
-    cat > /etc/systemd/system/mtproto-proxy.service <<MT
+# --- Настройка сервиса MTG ---
+configure_mtg() {
+    echo -e "${YELLOW}→ Настройка systemd сервиса MTProto (FakeTLS → ${TLS_DOMAIN})...${NC}"
+    
+    cat > /etc/systemd/system/mtg.service <<MT
 [Unit]
-Description=MTProto Proxy
+Description=MTProto Proxy (MTG with FakeTLS)
 After=network.target
 [Service]
 Type=simple
-WorkingDirectory=${MT_CONF}
-ExecStart=${MT_DIR}/objs/bin/mtproto-proxy -u nobody -p 8888 -H ${MT_PORT} -S ${MT_SECRET} --aes-pwd proxy-secret proxy-multi.conf
+ExecStart=/usr/local/bin/mtg run --bind 0.0.0.0:${MT_PORT} --tls=${TLS_DOMAIN} ${MT_SECRET}
 Restart=on-failure
+LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 MT
+    
     systemctl daemon-reload
-    systemctl enable mtproto-proxy >/dev/null 2>&1
-    systemctl restart mtproto-proxy
+    systemctl enable mtg >/dev/null 2>&1
+    systemctl restart mtg
     sleep 1
-    if systemctl is-active --quiet mtproto-proxy; then
-        echo -e "${GREEN}✓ MTProto запущен на порту ${MT_PORT}${NC}"
+    
+    if systemctl is-active --quiet mtg; then
+        echo -e "${GREEN}✓ MTProto запущен на порту ${MT_PORT} (FakeTLS → ${TLS_DOMAIN})${NC}"
     else
-        echo -e "${YELLOW}⚠ MTProto не запустился (не критично)${NC}"
+        echo -e "${RED}✗ MTProto не запустился!${NC}"
+        journalctl -u mtg -n 15 --no-pager
+        return 1
     fi
     return 0
 }
@@ -327,7 +364,7 @@ setup_fw() {
 # --- Генерация HTML ---
 generate_html() {
     echo -e "${YELLOW}→ Генерация HTML-файла...${NC}"
-    VLESS_LINK="vless://${VLESS_UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${PUBLIC_KEY}&sid=&type=tcp&flow=xtls-rprx-vision#EN_VLESS"
+    VLESS_LINK="vless://${VLESS_UUID}@${SERVER_IP}:${VLESS_PORT}?encryption=none&security=reality&sni=${TLS_DOMAIN}&fp=chrome&pbk=${PUBLIC_KEY}&sid=&type=tcp&flow=xtls-rprx-vision#EN_VLESS"
     SOCKS_LINK="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${SOCKS_PORT}#EN_SOCKS5"
     MT_LINK="tg://proxy?server=${SERVER_IP}&port=${MT_PORT}&secret=${MT_SECRET}"
 
@@ -343,13 +380,16 @@ body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:2
 .card{background:#fff;border-radius:12px;padding:25px;margin:15px 0;box-shadow:0 4px 6px rgba(0,0,0,.1)}
 h1{text-align:center;color:#1a202c}
 h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
-.row{display:flex;align-items:center;gap:8px;margin:8px 0}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
 .box{background:#edf2f7;padding:12px;border-radius:6px;word-break:break-all;font-family:monospace;font-size:14px;flex:1;min-width:0}
 .lbl{font-weight:600;color:#2d3748;display:block;margin-top:12px}
-.btn{background:#3182ce;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;flex-shrink:0}
+.btn{background:#3182ce;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;white-space:nowrap;flex-shrink:0;text-decoration:none;font-size:14px}
 .btn:hover{background:#2c5282}
 .btn.ok{background:#38a169}
+.btn.tg{background:#0088cc}
+.btn.tg:hover{background:#006699}
 .info{background:#ebf8ff;border-left:4px solid #3182ce;padding:15px;margin:20px 0}
+.fake-tls{background:#f0fff4;border-left:4px solid #38a169;padding:10px;margin:10px 0;font-size:13px}
 </style>
 </head>
 <body>
@@ -358,12 +398,13 @@ h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
 
 <div class="card">
 <h2>🔐 VLESS + REALITY</h2>
+<div class="fake-tls">🛡️ <strong>REALITY</strong>: трафик маскируется под HTTPS к <code>${TLS_DOMAIN}</code></div>
 <span class="lbl">UUID:</span>
 <div class="row"><div class="box">${VLESS_UUID}</div><button class="btn" onclick="cp(this,'${VLESS_UUID}')">📋 Копировать</button></div>
 <span class="lbl">Public Key:</span>
 <div class="row"><div class="box">${PUBLIC_KEY}</div><button class="btn" onclick="cp(this,'${PUBLIC_KEY}')">📋 Копировать</button></div>
-<span class="lbl">SNI:</span>
-<div class="row"><div class="box">www.microsoft.com</div><button class="btn" onclick="cp(this,'www.microsoft.com')">📋 Копировать</button></div>
+<span class="lbl">SNI (домен):</span>
+<div class="row"><div class="box">${TLS_DOMAIN}</div><button class="btn" onclick="cp(this,'${TLS_DOMAIN}')">📋 Копировать</button></div>
 <span class="lbl">Порт:</span>
 <div class="row"><div class="box">${VLESS_PORT}</div><button class="btn" onclick="cp(this,'${VLESS_PORT}')">📋 Копировать</button></div>
 <span class="lbl">Ссылка для импорта:</span>
@@ -376,14 +417,15 @@ h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
 <div class="row"><div class="box">${SOCKS_USER}</div><button class="btn" onclick="cp(this,'${SOCKS_USER}')">📋 Копировать</button></div>
 <span class="lbl">Пароль:</span>
 <div class="row"><div class="box">${SOCKS_PASS}</div><button class="btn" onclick="cp(this,'${SOCKS_PASS}')">📋 Копировать</button></div>
-<span class="lbl">IP сервера, Порт:</span>
-<div class="row"><div class="box">${SERVER_IP}:${SOCKS_PORT}</div><button class="btn" onclick="cp(this,'${SERVER_IP}:${SOCKS_PORT}')">📋 Копировать</button></div>
+<span class="lbl">Порт:</span>
+<div class="row"><div class="box">${SOCKS_PORT}</div><button class="btn" onclick="cp(this,'${SOCKS_PORT}')">📋 Копировать</button></div>
 <span class="lbl">Ссылка для импорта:</span>
 <div class="row"><div class="box">${SOCKS_LINK}</div><button class="btn" onclick="cp(this,'${SOCKS_LINK}')">📋 Копировать</button></div>
 </div>
 
 <div class="card">
 <h2>✈️ MTProto FakeTLS</h2>
+<div class="fake-tls">🛡️ <strong>FakeTLS</strong>: трафик маскируется под браузер, обращающийся к <code>${TLS_DOMAIN}</code></div>
 <span class="lbl">Secret:</span>
 <div class="row"><div class="box">${MT_SECRET}</div><button class="btn" onclick="cp(this,'${MT_SECRET}')">📋 Копировать</button></div>
 <span class="lbl">Порт:</span>
@@ -392,6 +434,9 @@ h2{color:#3182ce;border-bottom:2px solid #3182ce;padding-bottom:8px}
 <div class="row"><div class="box">${SERVER_IP}</div><button class="btn" onclick="cp(this,'${SERVER_IP}')">📋 Копировать</button></div>
 <span class="lbl">Ссылка для Telegram:</span>
 <div class="row"><div class="box">${MT_LINK}</div><button class="btn" onclick="cp(this,'${MT_LINK}')">📋 Копировать</button></div>
+<div style="margin-top:15px;text-align:center">
+<a href="${MT_LINK}" class="btn tg">➕ Добавить в Telegram</a>
+</div>
 </div>
 
 <script>
@@ -417,89 +462,71 @@ HTML
     echo -e "${GREEN}✓ HTML сгенерирован: $HTML_FILE${NC}"
 }
 
-# --- ПУНКТ 1: Полная установка (с проверкой сохранённых данных) ---
+# --- ПУНКТ 1: Полная установка ---
 do_full_install() {
     echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║      ПОЛНАЯ УСТАНОВКА EN СЕРВЕРА       ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
     
-    # Проверяем наличие сохранённого конфига
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
         echo -e "${YELLOW}⚠ Обнаружена существующая конфигурация:${NC}"
         echo -e "  IP:          $SERVER_IP"
         echo -e "  UUID:        $VLESS_UUID"
         echo -e "  Public Key:  ${PUBLIC_KEY:0:30}..."
-        echo -e "  SOCKS user:  $SOCKS_USER"
-        echo -e "  SOCKS pass:  $SOCKS_PASS"
+        echo -e "  SOCKS:       $SOCKS_USER / $SOCKS_PASS"
         echo -e "  MT secret:   $MT_SECRET"
+        echo -e "  TLS домен:   $TLS_DOMAIN"
         echo -e "  Порты:       VLESS=$VLESS_PORT, SOCKS=$SOCKS_PORT, MT=$MT_PORT"
         echo ""
         echo -e "${YELLOW}Что сделать?${NC}"
-        echo "  1) 🔄 Использовать СОХРАНЁННЫЕ данные (перезаписать конфиги, ключи те же)"
-        echo "  2) 🆕 Сгенерировать НОВЫЕ данные (старые будут потеряны)"
+        echo "  1) 🔄 Использовать СОХРАНЁННЫЕ данные"
+        echo "  2) 🆕 Сгенерировать НОВЫЕ данные"
         echo "  0) Отмена"
-        echo ""
         read -rp "Ваш выбор [1]: " mode
         mode=${mode:-1}
         
         case $mode in
             2)
-                echo -e "${YELLOW}→ Будут сгенерированы новые ключи...${NC}"
-                read -rp "Вы уверены? Все клиенты потеряют подключение (y/N): " ans
+                read -rp "Вы уверены? (y/N): " ans
                 [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
-                # Продолжаем ниже — полная установка с новыми ключами
                 ;;
             1)
-                echo -e "${GREEN}→ Используем сохранённые данные${NC}"
                 disable_ufw
                 install_deps
                 setup_xray || return
-                
-                # Проверяем, что все нужные переменные есть
                 if [ -z "$VLESS_UUID" ] || [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-                    echo -e "${RED}✗ Сохранённые данные повреждены. Перегенерируем...${NC}"
                     generate_params || return
                 fi
-                
                 configure_xray || return
-                setup_mtproto || return
-                configure_mtproto
+                setup_mtg || return
+                configure_mtg
                 setup_fw
                 save_config
                 generate_html
-                
-                echo -e "\n${GREEN}════════════════════════════════════════${NC}"
-                echo -e "${GREEN}✅ КОНФИГУРАЦИИ ПЕРЕЗАПИСАНЫ С ТЕМИ ЖЕ КЛЮЧАМИ${NC}"
-                echo -e "${GREEN}════════════════════════════════════════${NC}"
-                echo -e "HTML-файл: ${YELLOW}$HTML_FILE${NC}"
+                echo -e "\n${GREEN}✅ КОНФИГУРАЦИИ ПЕРЕЗАПИСАНЫ С ТЕМИ ЖЕ КЛЮЧАМИ${NC}"
                 return
                 ;;
-            *)
-                echo "Отменено"
-                return
-                ;;
+            *) echo "Отменено"; return ;;
         esac
     else
         read -rp "Начать полную установку? (y/N): " ans
         [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
     fi
     
-    # Полная установка с новыми ключами
     disable_ufw
     install_deps
-    setup_xray || { echo -e "${RED}✗ Установка Xray провалена${NC}"; return; }
-    generate_params || { echo -e "${RED}✗ Генерация параметров провалена${NC}"; return; }
-    configure_xray || { echo -e "${RED}✗ Конфигурация Xray провалена${NC}"; return; }
-    setup_mtproto || { echo -e "${RED}✗ Установка MTProto провалена${NC}"; return; }
-    configure_mtproto
+    ask_tls_domain
+    setup_xray || return
+    generate_params || return
+    configure_xray || return
+    setup_mtg || return
+    configure_mtg
     setup_fw
     save_config
     generate_html
     
-    echo -e "\n${GREEN}════════════════════════════════════════${NC}"
-    echo -e "${GREEN}✅ УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО${NC}"
-    echo -e "${GREEN}════════════════════════════════════════${NC}"
+    echo -e "\n${GREEN}✅ УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО${NC}"
     echo -e "HTML-файл: ${YELLOW}$HTML_FILE${NC}"
 }
 
@@ -509,36 +536,16 @@ do_restart() {
     echo -e "${GREEN}║         ПЕРЕЗАПУСК СЕРВИСОВ            ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
     
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}✗ Сохранённая конфигурация не найдена!${NC}"
-        echo -e "${YELLOW}Сначала выполните полную установку (пункт 1)${NC}"
-        return
-    fi
-    
+    [ ! -f "$CONFIG_FILE" ] && { echo -e "${RED}✗ Конфиг не найден!${NC}"; return; }
     source "$CONFIG_FILE"
-    echo -e "${BLUE}Используем сохранённые параметры:${NC}"
-    echo "  UUID: ${VLESS_UUID:0:20}..."
-    echo "  Public Key: ${PUBLIC_KEY:0:20}..."
-    echo ""
     
-    echo -e "${YELLOW}→ Перезапуск Xray...${NC}"
     systemctl restart xray 2>&1
     sleep 2
-    if systemctl is-active --quiet xray; then
-        echo -e "${GREEN}  ✓ Xray перезапущен${NC}"
-    else
-        echo -e "${RED}  ✗ Xray не запустился. Логи:${NC}"
-        journalctl -u xray -n 10 --no-pager
-    fi
+    systemctl is-active --quiet xray && echo -e "${GREEN}✓ Xray перезапущен${NC}" || echo -e "${RED}✗ Xray не запустился${NC}"
     
-    echo -e "${YELLOW}→ Перезапуск MTProto...${NC}"
-    systemctl restart mtproto-proxy 2>&1
+    systemctl restart mtg 2>&1
     sleep 1
-    if systemctl is-active --quiet mtproto-proxy; then
-        echo -e "${GREEN}  ✓ MTProto перезапущен${NC}"
-    else
-        echo -e "${RED}  ✗ MTProto не запустился${NC}"
-    fi
+    systemctl is-active --quiet mtg && echo -e "${GREEN}✓ MTProto перезапущен${NC}" || echo -e "${RED}✗ MTProto не запустился${NC}"
     
     echo -e "\n${GREEN}✅ Перезапуск завершён${NC}"
 }
@@ -546,103 +553,104 @@ do_restart() {
 # --- ПУНКТ 3: Перегенерация ключей ---
 do_regen_keys() {
     echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║      ПЕРЕГЕНЕРАЦИЯ КЛЮЧЕЙ И ССЫЛОК     ║${NC}"
+    echo -e "${GREEN}║      ПЕРЕГЕНЕРАЦИЯ КЛЮЧЕЙ              ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
     
     if ! load_config; then
-        echo -e "${RED}✗ Конфигурация не найдена. Сначала выполните полную установку (п.1)${NC}"
+        echo -e "${RED}✗ Конфиг не найден${NC}"
         return
     fi
     
     echo -e "${YELLOW}Старые параметры:${NC}"
     echo "  UUID: $VLESS_UUID"
     echo "  Public Key: $PUBLIC_KEY"
-    echo "  SOCKS user: $SOCKS_USER"
-    echo "  SOCKS pass: $SOCKS_PASS"
-    echo "  MTProto secret: $MT_SECRET"
+    echo "  MT secret: $MT_SECRET"
     
     read -rp "Сгенерировать новые ключи? (y/N): " ans
     [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
     
     generate_params || return
     configure_xray || return
-    configure_mtproto
+    configure_mtg
     save_config
     generate_html
     
-    echo -e "\n${GREEN}════════════════════════════════════════${NC}"
-    echo -e "${GREEN}✅ КЛЮЧИ ПЕРЕГЕНЕРИРОВАНЫ${NC}"
-    echo -e "${GREEN}════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}⚠️  ВАЖНО: Обновите настройки во всех клиентах!${NC}"
-    echo -e "Новый HTML: ${YELLOW}$HTML_FILE${NC}"
+    echo -e "\n${GREEN}✅ КЛЮЧИ ПЕРЕГЕНЕРИРОВАНЫ${NC}"
+    echo -e "${YELLOW}⚠️ Обновите настройки во всех клиентах!${NC}"
 }
 
-# --- ПУНКТ 4: Статус ---
+# --- ПУНКТ 4: Сменить TLS домен ---
+do_change_tls() {
+    echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║      ИЗМЕНИТЬ TLS ДОМЕН                ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+    
+    if ! load_config; then
+        echo -e "${RED}✗ Конфиг не найден${NC}"
+        return
+    fi
+    
+    echo -e "${YELLOW}Текущий домен: $TLS_DOMAIN${NC}"
+    ask_tls_domain
+    
+    configure_xray || return
+    configure_mtg
+    save_config
+    generate_html
+    
+    echo -e "\n${GREEN}✅ TLS домен изменён на: $TLS_DOMAIN${NC}"
+}
+
+# --- ПУНКТ 5: Статус ---
 do_status() {
     echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║           СТАТУС СЕРВИСОВ              ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
     
     echo -e "${BLUE}═══ Xray ═══${NC}"
-    systemctl status xray --no-pager 2>&1 | head -15
-    echo ""
-    echo -e "${BLUE}═══ MTProto ═══${NC}"
-    systemctl status mtproto-proxy --no-pager 2>&1 | head -15
-    echo ""
-    echo -e "${BLUE}═══ iptables правила ═══${NC}"
-    iptables -L INPUT -n -v 2>&1 | head -20
-    echo ""
-    echo -e "${BLUE}═══ Открытые порты ═══${NC}"
+    systemctl status xray --no-pager 2>&1 | head -10
+    echo -e "\n${BLUE}═══ MTProto (mtg) ═══${NC}"
+    systemctl status mtg --no-pager 2>&1 | head -10
+    echo -e "\n${BLUE}═══ Открытые порты ═══${NC}"
     ss -tlnp | grep -E ":(443|10808|8888)" || echo "Ничего не слушает"
 }
 
-# --- ПУНКТ 5: Показать настройки ---
+# --- ПУНКТ 6: Показать настройки ---
 do_show_config() {
     echo -e "\n${GREEN}╔════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║         ТЕКУЩИЕ НАСТРОЙКИ              ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
     
     if ! load_config; then
-        echo -e "${RED}✗ Конфигурация не найдена${NC}"
+        echo -e "${RED}✗ Конфиг не найден${NC}"
         return
     fi
     
     echo -e "${BLUE}IP сервера:${NC}      $SERVER_IP"
+    echo -e "${BLUE}TLS домен:${NC}       $TLS_DOMAIN"
     echo -e "${BLUE}VLESS UUID:${NC}      $VLESS_UUID"
-    echo -e "${BLUE}VLESS порт:${NC}      $VLESS_PORT"
     echo -e "${BLUE}Public Key:${NC}      $PUBLIC_KEY"
-    echo -e "${BLUE}Private Key:${NC}     $PRIVATE_KEY"
-    echo -e "${BLUE}SOCKS логин:${NC}     $SOCKS_USER"
-    echo -e "${BLUE}SOCKS пароль:${NC}    $SOCKS_PASS"
-    echo -e "${BLUE}SOCKS порт:${NC}      $SOCKS_PORT"
-    echo -e "${BLUE}MTProto порт:${NC}    $MT_PORT"
+    echo -e "${BLUE}SOCKS:${NC}           $SOCKS_USER / $SOCKS_PASS"
     echo -e "${BLUE}MTProto secret:${NC}  $MT_SECRET"
-    echo ""
-    echo -e "${YELLOW}HTML-файл:${NC} $HTML_FILE"
+    echo -e "${BLUE}Порты:${NC}           VLESS=$VLESS_PORT, SOCKS=$SOCKS_PORT, MT=$MT_PORT"
+    echo -e "\n${YELLOW}HTML-файл:${NC} $HTML_FILE"
 }
 
-# --- ПУНКТ 6: Удаление ---
+# --- ПУНКТ 7: Удаление ---
 do_uninstall() {
     echo -e "\n${RED}╔════════════════════════════════════════╗${NC}"
     echo -e "${RED}║         ПОЛНОЕ УДАЛЕНИЕ                ║${NC}"
     echo -e "${RED}╚════════════════════════════════════════╝${NC}\n"
     
-    read -rp "${RED}Удалить ВСЕ компоненты (Xray, MTProto, конфиги, HTML)? (y/N): ${NC}" ans
+    read -rp "${RED}Удалить ВСЕ компоненты? (y/N): ${NC}" ans
     [ "$ans" != "y" ] && [ "$ans" != "Y" ] && { echo "Отменено"; return; }
     
-    echo -e "${YELLOW}→ Остановка сервисов...${NC}"
-    systemctl stop xray 2>/dev/null
-    systemctl stop mtproto-proxy 2>/dev/null
-    systemctl disable xray 2>/dev/null
-    systemctl disable mtproto-proxy 2>/dev/null
-    
-    echo -e "${YELLOW}→ Удаление файлов...${NC}"
+    systemctl stop xray mtg 2>/dev/null
+    systemctl disable xray mtg 2>/dev/null
     rm -rf /usr/local/etc/xray
-    rm -rf "$MT_DIR"
-    rm -rf "$MT_CONF"
-    rm -f /etc/systemd/system/mtproto-proxy.service
-    rm -f "$HTML_FILE"
-    rm -f "$CONFIG_FILE"
+    rm -f /usr/local/bin/mtg
+    rm -f /etc/systemd/system/mtg.service
+    rm -f "$HTML_FILE" "$CONFIG_FILE"
     systemctl daemon-reload
     
     echo -e "${GREEN}✅ Всё удалено${NC}"
@@ -653,17 +661,18 @@ menu() {
     while true; do
         clear
         echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${BLUE}║        EN Server Manager (Xray + MTProto)            ║${NC}"
+        echo -e "${BLUE}║   EN Server Manager (Xray + MTProto FakeTLS)         ║${NC}"
         echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
         echo ""
         check_installed
         echo -e "${YELLOW}Выберите действие:${NC}"
-        echo "  1) 🚀 Полная установка (с нуля / с сохранёнными данными)"
+        echo "  1) 🚀 Полная установка"
         echo "  2) 🔄 Перезапустить сервисы"
-        echo "  3) 🔑 Перегенерировать ключи и обновить конфиг"
-        echo "  4) 📊 Показать статус сервисов"
-        echo "  5) 📋 Показать текущие настройки"
-        echo "  6) 🗑️  Полное удаление"
+        echo "  3) 🔑 Перегенерировать ключи"
+        echo "  4) 🌐 Изменить TLS домен (FakeTLS маскировка)"
+        echo "  5) 📊 Показать статус сервисов"
+        echo "  6) 📋 Показать текущие настройки"
+        echo "  7) 🗑️  Полное удаление"
         echo "  0) 🚪 Выход"
         echo ""
         read -rp "Введите номер: " choice
@@ -672,9 +681,10 @@ menu() {
             1) do_full_install ;;
             2) do_restart ;;
             3) do_regen_keys ;;
-            4) do_status ;;
-            5) do_show_config ;;
-            6) do_uninstall ;;
+            4) do_change_tls ;;
+            5) do_status ;;
+            6) do_show_config ;;
+            7) do_uninstall ;;
             0) echo "Выход..."; exit 0 ;;
             *) echo -e "${RED}Неверный выбор${NC}" ;;
         esac
