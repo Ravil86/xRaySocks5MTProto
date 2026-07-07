@@ -267,36 +267,94 @@ XRAY
     return 0
 }
 
-# --- Установка MTG (MTProto с FakeTLS) ---
+# --- Установка MTG (MTProto с FakeTLS) - ИСПРАВЛЕННАЯ ВЕРСИЯ ---
 setup_mtg() {
     echo -e "${YELLOW}→ Установка MTG (MTProto proxy с FakeTLS)...${NC}"
     
-    # Определяем архитектуру
+    # Определяем архитектуру с правильными именами архивов
     ARCH=$(uname -m)
     case $ARCH in
-        x86_64) MTG_ARCH="linux-amd64" ;;
-        aarch64|arm64) MTG_ARCH="linux-arm64" ;;
-        armv7l) MTG_ARCH="linux-arm7" ;;
-        *) echo -e "${RED}✗ Неподдерживаемая архитектура: $ARCH${NC}"; return 1 ;;
+        x86_64)          MTG_ARCH="linux-amd64" ;;
+        aarch64|arm64)   MTG_ARCH="linux-arm64v8" ;;
+        armv7l)          MTG_ARCH="linux-armv7" ;;
+        *)
+            echo -e "${RED}✗ Неподдерживаемая архитектура: $ARCH${NC}"
+            return 1
+            ;;
     esac
     
-    # Скачиваем последнюю версию mtg
-    MTG_VERSION=$(curl -s https://api.github.com/repos/9seconds/mtg/releases/latest | grep -oP '"tag_name": "\K[^"]+' | head -1)
-    [ -z "$MTG_VERSION" ] && MTG_VERSION="v2.2.1"
+    # Фиксированная стабильная версия (fallback)
+    MTG_VERSION="2.1.0"
     
-    echo -e "  Версия: $MTG_VERSION, архитектура: $MTG_ARCH"
+    # Пытаемся получить последнюю версию с GitHub (не критично)
+    LATEST=$(curl -s --max-time 5 https://api.github.com/repos/9seconds/mtg/releases/latest 2>/dev/null | grep -oP '"tag_name": "\K[^"]+' | head -1 | sed 's/^v//')
+    [ -n "$LATEST" ] && MTG_VERSION="$LATEST"
+    
+    echo -e "  Версия: $MTG_VERSION, архитектура: $MTG_ARCH ($ARCH)"
     
     cd /tmp
-    wget -q "https://github.com/9seconds/mtg/releases/download/${MTG_VERSION}/mtg-${MTG_ARCH}" -O mtg
-    chmod +x mtg
-    mv mtg /usr/local/bin/mtg
+    rm -rf mtg-install && mkdir mtg-install && cd mtg-install
     
-    if ! command -v mtg &>/dev/null; then
-        echo -e "${RED}✗ Ошибка установки mtg${NC}"
+    DOWNLOAD_URL="https://github.com/9seconds/mtg/releases/download/v${MTG_VERSION}/mtg-${MTG_VERSION}-${MTG_ARCH}.tar.gz"
+    echo -e "  Скачивание: $DOWNLOAD_URL"
+    
+    if ! wget -q --timeout=30 "$DOWNLOAD_URL" -O mtg.tar.gz; then
+        # Fallback: пробуем без "v" в URL
+        DOWNLOAD_URL="https://github.com/9seconds/mtg/releases/download/${MTG_VERSION}/mtg-${MTG_VERSION}-${MTG_ARCH}.tar.gz"
+        echo -e "  ${YELLOW}Повторная попытка: $DOWNLOAD_URL${NC}"
+        if ! wget -q --timeout=30 "$DOWNLOAD_URL" -O mtg.tar.gz; then
+            echo -e "${RED}✗ Не удалось скачать mtg. Проверьте доступ к GitHub.${NC}"
+            return 1
+        fi
+    fi
+    
+    # Проверяем, что это действительно архив, а не HTML-ошибка
+    if ! file mtg.tar.gz | grep -qi "gzip"; then
+        echo -e "${RED}✗ Скачан некорректный файл (возможно, 404):${NC}"
+        file mtg.tar.gz
+        head -c 200 mtg.tar.gz
         return 1
     fi
     
-    echo -e "${GREEN}✓ MTG установлен: $(mtg --version 2>&1 | head -1)${NC}"
+    # Распаковка
+    if ! tar -xzf mtg.tar.gz; then
+        echo -e "${RED}✗ Ошибка распаковки архива${NC}"
+        return 1
+    fi
+    
+    # Ищем бинарник (он может быть в подпапке или в корне)
+    MTG_BIN=$(find . -name "mtg" -type f | head -1)
+    if [ -z "$MTG_BIN" ]; then
+        echo -e "${RED}✗ Бинарник mtg не найден в архиве!${NC}"
+        ls -la
+        return 1
+    fi
+    
+    # Проверка формата файла ДО установки
+    FILE_INFO=$(file "$MTG_BIN")
+    echo -e "  Файл: $FILE_INFO"
+    if ! echo "$FILE_INFO" | grep -qiE "ELF.*executable"; then
+        echo -e "${RED}✗ Файл не является ELF-бинарником!${NC}"
+        return 1
+    fi
+    
+    # Установка
+    chmod +x "$MTG_BIN"
+    mv "$MTG_BIN" /usr/local/bin/mtg
+    
+    # Очистка
+    cd /tmp && rm -rf mtg-install
+    
+    # Финальная проверка
+    if ! command -v mtg &>/dev/null; then
+        echo -e "${RED}✗ mtg не установлен в PATH${NC}"
+        return 1
+    fi
+    
+    MTG_VER_OUTPUT=$(mtg --version 2>&1 || echo "unknown")
+    echo -e "${GREEN}✓ MTG успешно установлен${NC}"
+    echo -e "  Версия: $MTG_VER_OUTPUT"
+    echo -e "  Путь: $(which mtg)"
     return 0
 }
 
